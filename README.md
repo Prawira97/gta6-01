@@ -1,4 +1,4 @@
-# Make GTA 6 — Open-World Crime Game
+# Solmar Bay — Open-World Crime Game
 
 [![make.fun](https://make.fun/badge/gta6-01.svg)](https://make.fun/bounty/gta6-01)
 [![rank](https://make.fun/badge/gta6-01/Prawira97/gta6-01/rank.svg)](https://make.fun/bounty/gta6-01)
@@ -8,16 +8,42 @@ Entry for the make.fun competition [gta6-01](https://make.fun/bounty/gta6-01):
 build the most complete open-world crime game you can, in the spirit of
 GTA 6, that plays offline in a desktop browser from its own files.
 
-An open-world crime game set in a sun-soaked modern coastal city of its
-own — drive and steal cars, outrun the police as your wanted level rises,
-take on story missions, and build your reputation. No Rockstar assets:
-every name, character, place and story is original.
+**Solmar Bay** is an original open-world crime game set in a sun-soaked
+modern coastal city of its own. Kai Reyes is home after five years away,
+and the city took everything from him once — this time he takes it back,
+one job, one car, one street at a time. No Rockstar assets: every name,
+character, place and story is original.
 
-- **Open world** — explore the city on foot and by car, with traffic and pedestrians.
-- **Wanted system** — police respond to your crimes; lose them or lie low.
-- **Missions & story** — a story arc with missions, activities and combat.
-- **Progression** — earn cash and reputation, unlock vehicles and activities.
-- **HUD & minimap** — full HUD with minimap, menus and save (localStorage).
-- **Offline** — plain static files, no network requests; runs from `game/index.html`.
+- **Open world** — a 9×9 city of streets, beach and docks to explore on
+  foot and by car, with traffic, pedestrians, palms and a plaza fountain.
+- **Cars** — drive, steal and outrun the law in sedans, coupes and taxis;
+  parked cars face the road so they pull straight out.
+- **Wanted system** — five stars; police cars and foot cops respond to
+  your crimes, chase you down and try to bust you. Lose them or lie low
+  and the heat cools off.
+- **Missions & story** — six story missions from Mara Solis, from
+  "Welcome Back" to "King of the Bay", plus taxi fares and 12 hidden
+  packages to find.
+- **Combat** — pistol and SMG (unlocked in mission 4), enemy guards and a
+  final boss, tracers and a health bar.
+- **Progression** — earn cash and reputation for missions, fares and
+  packages; your progress saves automatically (localStorage).
+- **HUD & minimap** — cash, reputation, health, wanted stars, speed,
+  weapon, objective with distance, live minimap, mission banners, title /
+  pause / busted / wasted screens.
+- **Sound** — procedural WebAudio: engine hum, sirens, shots, pickups.
+- **Offline** — plain static files, no network requests; runs from
+  `game/index.html`. three.js is vendored under `game/vendor/`.
+
+## Controls
+
+W A S D move / drive · mouse look · Shift sprint / handbrake · E enter or
+steal a car · click shoot · Q switch weapon · R reload · F interact ·
+P / Esc pause · wheel camera zoom.
+
+## Play it
 
 Serve locally with `node serve.ts`, then open http://localhost:8080.
+
+Deterministic screenshots: `?shot=start|play|mission|end&seed=1`
+(see `shots.json`).

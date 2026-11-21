@@ -1,141 +1,420 @@
-// Drawing only: the world's state and the current screen in, pixels out. The 1280x720 playfield
-// is scaled to fit the window and centred, the margin filled with the backdrop colour. Flat
-// rectangles and circles, canvas text for the HUD and the panels. Text that holds a number is
-// rebuilt only when the number changes, so a frame allocates nothing.
-import { FIELD, FONT, LIVES, PALETTE } from './config.js';
-import { KIND_COIN } from './world.js';
+// The renderer: a three.js scene for Solmar Bay — sun, sky, streets, instanced buildings,
+// trees, cars and people — plus the chase camera and the 2D minimap. It only paints the
+// world state; it never simulates. Every mesh it moves belongs to the world's plain state.
+import * as THREE from 'three';
+import { CITY, LANDMARKS, PALETTE } from './config.js';
+import { roadLines } from './city.js';
+import { animatePerson } from './people.js';
 
-export const SCREEN_TITLE = 'title';
-export const SCREEN_PLAY = 'play';
-export const SCREEN_PAUSED = 'paused';
-export const SCREEN_OVER = 'over';
+const TAU = Math.PI * 2;
 
-/** The panel's width; its height grows with its lines: room for the title, the lines and the prompt. */
-const PANEL = { width: 600, top: 134, line: 34, bottom: 70 };
-const LIFE_SIZE = 20;
-const LIFE_GAP = 8;
-
-function cachedLabel(prefix) {
-  let value = -1;
-  let text = '';
-  return function label(next) {
-    if (next !== value) {
-      value = next;
-      text = prefix + next;
+/** A canvas texture: pale facade with a grid of windows, some lit. */
+function makeFacadeTexture() {
+  const canvas = document.createElement('canvas');
+  canvas.width = 128;
+  canvas.height = 256;
+  const g = canvas.getContext('2d');
+  g.fillStyle = '#f5efe2';
+  g.fillRect(0, 0, 128, 256);
+  g.fillStyle = '#e2d8c2';
+  g.fillRect(0, 248, 128, 8);
+  for (let row = 0; row < 8; row += 1) {
+    for (let col = 0; col < 4; col += 1) {
+      const lit = ((row * 4 + col) % 5) === 0;
+      g.fillStyle = lit ? '#ffe9a8' : '#5a7a94';
+      g.fillRect(12 + col * 28, 14 + row * 30, 18, 20);
     }
-    return text;
-  };
+  }
+  const tex = new THREE.CanvasTexture(canvas);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  return tex;
 }
 
-export function createRenderer(canvas) {
-  const context = canvas.getContext('2d');
-  const view = { scale: 1, x: 0, y: 0 };
-  const scoreLabel = cachedLabel('Score ');
-  const levelLabel = cachedLabel('Level ');
-  const finalLabel = cachedLabel('Score ');
-  const bestLabel = cachedLabel('Best ');
+/** A canvas texture: dark asphalt with a dashed centre line, repeated along a road. */
+function makeRoadTexture() {
+  const canvas = document.createElement('canvas');
+  canvas.width = 64;
+  canvas.height = 64;
+  const g = canvas.getContext('2d');
+  g.fillStyle = '#3a3f46';
+  g.fillRect(0, 0, 64, 64);
+  g.fillStyle = '#43484f';
+  for (let i = 0; i < 40; i += 1) g.fillRect((i * 37) % 64, (i * 53) % 64, 2, 2);
+  g.fillStyle = '#e8d27a';
+  g.fillRect(30, 6, 4, 22);
+  const tex = new THREE.CanvasTexture(canvas);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  tex.wrapS = THREE.RepeatWrapping;
+  tex.wrapT = THREE.RepeatWrapping;
+  return tex;
+}
 
-  function resize() {
-    const ratio = window.devicePixelRatio || 1;
-    const width = Math.round(window.innerWidth * ratio);
-    const height = Math.round(window.innerHeight * ratio);
-    canvas.width = width;
-    canvas.height = height;
-    view.scale = Math.min(width / FIELD.width, height / FIELD.height);
-    view.x = (width - FIELD.width * view.scale) / 2;
-    view.y = (height - FIELD.height * view.scale) / 2;
+export function createRenderer(canvas, city, minimapCanvas) {
+  const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+  renderer.toneMapping = THREE.ACESFilmicToneMapping;
+  renderer.toneMappingExposure = 1.15;
+
+  const scene = new THREE.Scene();
+  scene.background = new THREE.Color(PALETTE.sky);
+  scene.fog = new THREE.Fog(PALETTE.fog, 200, 560);
+
+  const sun = new THREE.DirectionalLight(PALETTE.sun, PALETTE.sunIntensity);
+  sun.position.set(140, 190, 80);
+  scene.add(sun);
+  scene.add(new THREE.HemisphereLight(PALETTE.hemiSky, PALETTE.hemiGround, PALETTE.hemiIntensity));
+
+  // Ground, sidewalks, roads, beach and sea.
+  const groundMat = new THREE.MeshStandardMaterial({ color: 0xb8a88e, roughness: 1 });
+  const ground = new THREE.Mesh(new THREE.PlaneGeometry(720, 640), groundMat);
+  ground.rotation.x = -Math.PI / 2;
+  ground.position.set(20, 0, 0);
+  scene.add(ground);
+
+  const sidewalkMat = new THREE.MeshStandardMaterial({ color: PALETTE.sidewalk, roughness: 1 });
+  const roadTex = makeRoadTexture();
+  const roadMat = new THREE.MeshStandardMaterial({ map: roadTex, roughness: 0.95 });
+  for (const line of roadLines()) {
+    const walkV = new THREE.Mesh(new THREE.PlaneGeometry(20, 640), sidewalkMat);
+    walkV.rotation.x = -Math.PI / 2;
+    walkV.position.set(line, 0.01, 0);
+    scene.add(walkV);
+    const walkH = new THREE.Mesh(new THREE.PlaneGeometry(640, 20), sidewalkMat);
+    walkH.rotation.x = -Math.PI / 2;
+    walkH.position.set(0, 0.01, line);
+    scene.add(walkH);
+    const roadV = new THREE.Mesh(new THREE.PlaneGeometry(14, 640), roadMat.clone());
+    roadV.material.map = roadTex.clone();
+    roadV.material.map.repeat.set(1, 80);
+    roadV.material.map.needsUpdate = true;
+    roadV.rotation.x = -Math.PI / 2;
+    roadV.position.set(line, 0.02, 0);
+    scene.add(roadV);
+    const roadH = new THREE.Mesh(new THREE.PlaneGeometry(640, 14), roadMat.clone());
+    roadH.material.map = roadTex.clone();
+    roadH.material.map.repeat.set(80, 1);
+    roadH.material.map.needsUpdate = true;
+    roadH.rotation.x = -Math.PI / 2;
+    roadH.position.set(0, 0.02, line);
+    scene.add(roadH);
   }
 
-  const fonts = new Map();
-  function text(value, x, y, size, color, align) {
-    if (!fonts.has(size)) fonts.set(size, `${size}px ${FONT}`);
-    context.font = fonts.get(size);
-    context.fillStyle = color;
-    context.textAlign = align;
-    context.fillText(value, x, y);
+  const sand = new THREE.Mesh(
+    new THREE.PlaneGeometry(70, 640),
+    new THREE.MeshStandardMaterial({ color: PALETTE.sand, roughness: 1 }),
+  );
+  sand.rotation.x = -Math.PI / 2;
+  sand.position.set(287, 0.03, 0);
+  scene.add(sand);
+  const water = new THREE.Mesh(
+    new THREE.PlaneGeometry(120, 640),
+    new THREE.MeshStandardMaterial({ color: PALETTE.water, roughness: 0.15, metalness: 0.1 }),
+  );
+  water.rotation.x = -Math.PI / 2;
+  water.position.set(380, 0.05, 0);
+  scene.add(water);
+
+  // Buildings, one instanced box with a facade texture and a tint each.
+  const facade = makeFacadeTexture();
+  const buildingMat = new THREE.MeshStandardMaterial({ map: facade, roughness: 0.9 });
+  const buildingMesh = new THREE.InstancedMesh(new THREE.BoxGeometry(1, 1, 1), buildingMat, city.buildings.length);
+  const matrix = new THREE.Matrix4();
+  const quat = new THREE.Quaternion();
+  const scale = new THREE.Vector3();
+  const pos = new THREE.Vector3();
+  const color = new THREE.Color();
+  city.buildings.forEach((b, i) => {
+    pos.set(b.x, b.h / 2, b.z);
+    scale.set(b.w, b.h, b.d);
+    matrix.compose(pos, quat, scale);
+    buildingMesh.setMatrixAt(i, matrix);
+    buildingMesh.setColorAt(i, color.set(b.color)); // set() takes numbers and '#rrggbb' alike
+  });
+  buildingMesh.instanceMatrix.needsUpdate = true;
+  if (buildingMesh.instanceColor) buildingMesh.instanceColor.needsUpdate = true;
+  scene.add(buildingMesh);
+
+  // Trees: trunks and foliage, instanced; palms get a taller trunk and a cone crown.
+  const trunkGeo = new THREE.CylinderGeometry(0.18, 0.28, 2.4, 6);
+  const trunkMat = new THREE.MeshStandardMaterial({ color: 0x7a5a3a, roughness: 1 });
+  const trunkMesh = new THREE.InstancedMesh(trunkGeo, trunkMat, city.trees.length);
+  const leafMat = new THREE.MeshStandardMaterial({ color: 0x4a9a4a, roughness: 1 });
+  const leafMesh = new THREE.InstancedMesh(new THREE.IcosahedronGeometry(1.6, 0), leafMat, city.trees.length);
+  const leafColor = new THREE.Color();
+  city.trees.forEach((t, i) => {
+    const h = t.palm ? 4.5 : 2.4;
+    pos.set(t.x, h / 2, t.z);
+    scale.set(t.s, h / 2.4, t.s);
+    matrix.compose(pos, quat, scale);
+    trunkMesh.setMatrixAt(i, matrix);
+    pos.set(t.x, h + 1.2 * t.s, t.z);
+    scale.set(t.s, t.s, t.s);
+    matrix.compose(pos, quat, scale);
+    leafMesh.setMatrixAt(i, matrix);
+    leafMesh.setColorAt(i, leafColor.setHex(t.palm ? 0x3a8a3a : 0x4a9a4a).offsetHSL(0, 0, (i % 5) * 0.02));
+  });
+  trunkMesh.instanceMatrix.needsUpdate = true;
+  leafMesh.instanceMatrix.needsUpdate = true;
+  if (leafMesh.instanceColor) leafMesh.instanceColor.needsUpdate = true;
+  scene.add(trunkMesh, leafMesh);
+
+  // Street lamps: thin poles with a glowing head.
+  const lampMesh = new THREE.InstancedMesh(
+    new THREE.CylinderGeometry(0.09, 0.12, 5, 6),
+    new THREE.MeshStandardMaterial({ color: 0x2a2f38, roughness: 0.7 }),
+    city.lamps.length,
+  );
+  city.lamps.forEach((lamp, i) => {
+    pos.set(lamp.x, 2.5, lamp.z);
+    scale.set(1, 1, 1);
+    matrix.compose(pos, quat, scale);
+    lampMesh.setMatrixAt(i, matrix);
+  });
+  lampMesh.instanceMatrix.needsUpdate = true;
+  scene.add(lampMesh);
+
+  // Plaza fountain and the dock pier.
+  const fountain = new THREE.Mesh(
+    new THREE.CylinderGeometry(4, 4.4, 1, 20),
+    new THREE.MeshStandardMaterial({ color: 0xcfc4ae, roughness: 0.8 }),
+  );
+  fountain.position.set(0, 0.5, 0);
+  scene.add(fountain);
+  const fountainWater = new THREE.Mesh(
+    new THREE.CylinderGeometry(3.6, 3.6, 0.2, 20),
+    new THREE.MeshStandardMaterial({ color: 0x5ab8e8, roughness: 0.2 }),
+  );
+  fountainWater.position.set(0, 1.05, 0);
+  scene.add(fountainWater);
+  const pierMat = new THREE.MeshStandardMaterial({ color: 0x8a6a4a, roughness: 1 });
+  for (let k = 0; k < 3; k += 1) {
+    const pier = new THREE.Mesh(new THREE.BoxGeometry(26, 1, 6), pierMat);
+    pier.position.set(310, 0.6, 176 + k * 20);
+    scene.add(pier);
   }
 
-  function drawField(state) {
-    context.fillStyle = PALETTE.sky;
-    context.fillRect(0, 0, FIELD.width, FIELD.height);
-    context.fillStyle = PALETTE.ground;
-    context.fillRect(0, FIELD.groundY, FIELD.width, FIELD.height - FIELD.groundY);
+  // Objective beacon: a glowing pillar and a floating arrow, moved each frame.
+  const beacon = new THREE.Mesh(
+    new THREE.CylinderGeometry(3, 3, 30, 12, 1, true),
+    new THREE.MeshBasicMaterial({ color: 0xf2c230, transparent: true, opacity: 0.55, side: THREE.DoubleSide, depthWrite: false }),
+  );
+  beacon.visible = false;
+  scene.add(beacon);
+  const arrow = new THREE.Mesh(
+    new THREE.ConeGeometry(1.1, 2.4, 4),
+    new THREE.MeshBasicMaterial({ color: 0xf2c230 }),
+  );
+  arrow.rotation.x = Math.PI;
+  arrow.visible = false;
+  scene.add(arrow);
 
-    const items = state.items;
-    for (let index = 0; index < items.length; index += 1) {
-      const item = items[index];
-      if (!item.active) continue;
-      if (item.kind === KIND_COIN) {
-        context.fillStyle = PALETTE.coin;
-        context.beginPath();
-        context.arc(item.x + item.width / 2, item.y + item.height / 2, item.width / 2, 0, Math.PI * 2);
-        context.fill();
-      } else {
-        context.fillStyle = PALETTE.block;
-        context.fillRect(item.x, item.y, item.width, item.height);
+  // Collectibles: small gold boxes, spun by the world.
+  const collectibleMeshes = [];
+  const goldMat = new THREE.MeshStandardMaterial({ color: 0xf2c230, emissive: 0xa88200, emissiveIntensity: 0.7, roughness: 0.3, metalness: 0.6 });
+  for (const c of city.collectibleSpots) {
+    const mesh = new THREE.Mesh(new THREE.BoxGeometry(0.9, 0.9, 0.9), goldMat);
+    mesh.position.set(c.x, 1.2, c.z);
+    scene.add(mesh);
+    collectibleMeshes.push(mesh);
+  }
+
+  // Tracers: one line-segment buffer, rewritten every frame.
+  const tracerGeo = new THREE.BufferGeometry();
+  const tracerPos = new Float32Array(64 * 6);
+  tracerGeo.setAttribute('position', new THREE.BufferAttribute(tracerPos, 3));
+  const tracerLines = new THREE.LineSegments(tracerGeo, new THREE.LineBasicMaterial({ color: 0xffe9a0, transparent: true, opacity: 0.9 }));
+  tracerLines.frustumCulled = false;
+  scene.add(tracerLines);
+
+  const camera = new THREE.PerspectiveCamera(62, 1, 0.1, 1200);
+  const knownMeshes = new Set();
+  const minimap = minimapCanvas ? minimapCanvas.getContext('2d') : null;
+
+  function syncEntity(entity, time) {
+    const mesh = entity.mesh;
+    if (!mesh) return;
+    if (!mesh.parent) {
+      scene.add(mesh);
+      knownMeshes.add(mesh);
+    }
+    mesh.position.set(entity.x, entity.dead ? 0.3 : 0, entity.z);
+    mesh.rotation.y = -entity.heading;
+    if (entity.dead) mesh.rotation.x = Math.PI / 2;
+    else if (entity.kind === 'police' || entity.speed !== undefined) {
+      // Cars: spin the wheels with speed.
+      const wheels = mesh.userData.wheels;
+      if (wheels) {
+        const spin = (entity.speed / 0.38) * 0.016;
+        for (const w of wheels) w.rotation.z += spin;
       }
-    }
-
-    const player = state.player;
-    // Blink while invulnerable after a hit: hidden on every other tenth of a second.
-    if (player.invulnerable === 0 || Math.floor(player.invulnerable * 10) % 2 === 1) {
-      context.fillStyle = PALETTE.player;
-      context.fillRect(player.x, player.y, player.width, player.height);
-    }
-  }
-
-  function drawHud(state) {
-    context.textBaseline = 'top';
-    text(scoreLabel(state.score), 24, 20, 28, PALETTE.text, 'left');
-    text(levelLabel(state.level), FIELD.width / 2, 20, 28, PALETTE.text, 'center');
-    const firstLife = FIELD.width - 24 - LIVES * (LIFE_SIZE + LIFE_GAP) + LIFE_GAP;
-    text('Lives', firstLife - 12, 20, 28, PALETTE.text, 'right');
-    for (let life = 0; life < LIVES; life += 1) {
-      context.fillStyle = life < state.lives ? PALETTE.player : PALETTE.ground;
-      context.fillRect(firstLife + life * (LIFE_SIZE + LIFE_GAP), 24, LIFE_SIZE, LIFE_SIZE);
+      const bar = mesh.userData.lightBar;
+      if (bar) {
+        const on = Math.floor(time * 6) % 2 === 0;
+        bar.red.material.emissiveIntensity = on ? 2.2 : 0.2;
+        bar.blue.material.emissiveIntensity = on ? 0.2 : 2.2;
+      }
+    } else {
+      animatePerson(mesh, entity.phase ?? 0, entity.speed > 0.1 ? 1 : 0);
     }
   }
 
-  function drawPanel(title, lines, prompt) {
-    const height = PANEL.top + lines.length * PANEL.line + PANEL.bottom;
-    const x = (FIELD.width - PANEL.width) / 2;
-    const y = (FIELD.height - height) / 2;
-    context.fillStyle = PALETTE.panel;
-    context.fillRect(x, y, PANEL.width, height);
-    context.textBaseline = 'alphabetic';
-    text(title, FIELD.width / 2, y + 78, 48, PALETTE.text, 'center');
-    for (let index = 0; index < lines.length; index += 1) {
-      text(lines[index], FIELD.width / 2, y + PANEL.top + index * PANEL.line, 22, PALETTE.muted, 'center');
+  function drawMinimap(world) {
+    if (!minimap) return;
+    const size = minimapCanvas.width;
+    const scale = size / 660;
+    const toMap = (x, z) => [(x + 330) * scale, (z + 330) * scale];
+    minimap.fillStyle = '#2e7fb8';
+    minimap.fillRect(0, 0, size, size);
+    minimap.fillStyle = '#b8a88e';
+    minimap.fillRect(0, 0, (252 + 330) * scale, size);
+    minimap.fillStyle = '#e8cf9a';
+    minimap.fillRect((252 + 330) * scale, 0, (296 - 252) * scale, size);
+    minimap.strokeStyle = '#3a3f46';
+    minimap.lineWidth = 14 * scale;
+    for (const line of roadLines()) {
+      const [x1, y1] = toMap(line, -330);
+      const [x2, y2] = toMap(line, 330);
+      minimap.beginPath();
+      minimap.moveTo(x1, y1);
+      minimap.lineTo(x2, y2);
+      minimap.stroke();
+      const [hx1, hy1] = toMap(-330, line);
+      const [hx2, hy2] = toMap(330, line);
+      minimap.beginPath();
+      minimap.moveTo(hx1, hy1);
+      minimap.lineTo(hx2, hy2);
+      minimap.stroke();
     }
-    text(prompt, FIELD.width / 2, y + height - 40, 24, PALETTE.coin, 'center');
+    // Objective marker.
+    const objective = world.__objective;
+    if (objective && objective.at) {
+      const [ox, oy] = toMap(objective.at.x, objective.at.z);
+      minimap.fillStyle = '#f2c230';
+      minimap.beginPath();
+      minimap.moveTo(ox, oy - 7);
+      minimap.lineTo(ox + 6, oy);
+      minimap.lineTo(ox, oy + 7);
+      minimap.lineTo(ox - 6, oy);
+      minimap.closePath();
+      minimap.fill();
+    }
+    // Police blips.
+    minimap.fillStyle = '#ff2233';
+    for (const car of world.policeCars) {
+      const [px, py] = toMap(car.x, car.z);
+      minimap.beginPath();
+      minimap.arc(px, py, 3, 0, TAU);
+      minimap.fill();
+    }
+    // Player arrow.
+    const [px, py] = toMap(world.player.x, world.player.z);
+    minimap.save();
+    minimap.translate(px, py);
+    minimap.rotate(Math.atan2(Math.sin(world.player.heading), Math.cos(world.player.heading)) + Math.PI / 2);
+    minimap.fillStyle = '#2ec4b6';
+    minimap.beginPath();
+    minimap.moveTo(0, -7);
+    minimap.lineTo(5, 6);
+    minimap.lineTo(-5, 6);
+    minimap.closePath();
+    minimap.fill();
+    minimap.restore();
   }
 
-  const TITLE_LINES = ['Dodge the red blocks. Catch the gold coins.', 'Move with ← → or A D.  Pause with P.', ''];
-  const PAUSED_LINES = ['The blocks will wait for you.'];
-  const OVER_LINES = ['', ''];
+  return {
+    /** Resize the drawing buffer to the canvas's box. */
+    resize(width, height) {
+      renderer.setSize(width, height, false);
+      camera.aspect = width / height;
+      camera.updateProjectionMatrix();
+    },
+    /** Paint the world for one screen: 'title' | 'play' | 'paused' | 'over'. */
+    draw(world, screen, time) {
+      const p = world.player;
+      const forward = { x: Math.cos(world.camYaw), z: Math.sin(world.camYaw) };
+      if (screen === 'title') {
+        const a = time * 0.05;
+        camera.position.set(Math.cos(a) * 260, 120, Math.sin(a) * 260);
+        camera.lookAt(0, 10, 0);
+      } else {
+        const dist = world.camDist;
+        const height = dist * Math.sin(world.camPitch) + 2.5;
+        const back = dist * Math.cos(world.camPitch);
+        const cx = p.x - forward.x * back;
+        const cz = p.z - forward.z * back;
+        camera.position.set(cx, height, cz);
+        camera.lookAt(p.x + forward.x * 4, 1.8, p.z + forward.z * 4);
+      }
+      // Sync every entity's mesh.
+      const current = new Set();
+      for (const car of world.cars) {
+        syncEntity(car, time);
+        current.add(car.mesh);
+      }
+      for (const ped of [...world.peds, ...world.cops, ...world.enemies]) {
+        syncEntity(ped, time);
+        current.add(ped.mesh);
+      }
+      for (const mesh of [...knownMeshes]) {
+        if (!current.has(mesh)) {
+          scene.remove(mesh);
+          knownMeshes.delete(mesh);
+        }
+      }
+      // Player figure (hidden while driving).
+      this.updatePlayerMesh(world);
+      // Collectibles spin and hide when taken.
+      world.collectibles.forEach((c, i) => {
+        const mesh = collectibleMeshes[i];
+        mesh.visible = !c.taken;
+        mesh.rotation.y = c.angle;
+        mesh.position.y = 1.2 + Math.sin(c.angle * 0.7) * 0.2;
+      });
+      // Objective beacon.
+      const objective = world.__objective;
+      if (objective && objective.at) {
+        beacon.visible = true;
+        arrow.visible = true;
+        beacon.position.set(objective.at.x, 15, objective.at.z);
+        arrow.position.set(objective.at.x, 9 + Math.sin(time * 3) * 0.6, objective.at.z);
+      } else {
+        beacon.visible = false;
+        arrow.visible = false;
+      }
+      // Tracers.
+      let n = 0;
+      for (const t of world.tracers) {
+        if (n >= 32) break;
+        tracerPos[n * 6] = t.from.x;
+        tracerPos[n * 6 + 1] = t.from.y;
+        tracerPos[n * 6 + 2] = t.from.z;
+        tracerPos[n * 6 + 3] = t.to.x;
+        tracerPos[n * 6 + 4] = t.to.y;
+        tracerPos[n * 6 + 5] = t.to.z;
+        n += 1;
+      }
+      tracerGeo.setDrawRange(0, n * 2);
+      tracerGeo.attributes.position.needsUpdate = true;
+      tracerLines.material.opacity = 0.9;
 
-  /** Paint one frame: the field, then the HUD or a panel for the screen the game is on. */
-  function draw(state, screen, best) {
-    context.setTransform(1, 0, 0, 1, 0, 0);
-    context.fillStyle = PALETTE.backdrop;
-    context.fillRect(0, 0, canvas.width, canvas.height);
-    context.setTransform(view.scale, 0, 0, view.scale, view.x, view.y);
-    drawField(state);
-    if (screen === SCREEN_TITLE) {
-      TITLE_LINES[2] = bestLabel(best);
-      drawPanel('Block Dodger', TITLE_LINES, 'Press Space or click to start');
-      return;
-    }
-    drawHud(state);
-    if (screen === SCREEN_PAUSED) drawPanel('Paused', PAUSED_LINES, 'Press P to resume');
-    else if (screen === SCREEN_OVER) {
-      OVER_LINES[0] = finalLabel(state.score);
-      OVER_LINES[1] = bestLabel(best);
-      drawPanel('Game over', OVER_LINES, 'Press Space or click to play again');
-    }
-  }
-
-  resize();
-  window.addEventListener('resize', resize);
-  return { draw };
+      renderer.render(scene, camera);
+      drawMinimap(world);
+    },
+    /** The player figure mesh, created once by main and owned by the renderer. */
+    setPlayerMesh(mesh) {
+      if (this.playerMesh) scene.remove(this.playerMesh);
+      this.playerMesh = mesh;
+      scene.add(mesh);
+    },
+    updatePlayerMesh(world) {
+      if (!this.playerMesh) return;
+      const p = world.player;
+      this.playerMesh.visible = world.playerCar === null && !world.endState;
+      this.playerMesh.position.set(p.x, 0, p.z);
+      this.playerMesh.rotation.y = -p.heading;
+      animatePerson(this.playerMesh, p.phase, p.speed > 0.1 ? 1 : 0);
+    },
+    scene,
+    camera,
+  };
 }

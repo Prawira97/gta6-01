@@ -1,79 +1,70 @@
-// The screenshot scenes behind ?shot=start|play|end. Each one plays the real rules forward from a
-// fresh world for a fixed number of steps, steered by a simple autopilot (look ahead each way the
-// paddle could move, keep clear of blocks, chase the lowest coin when that is safe), so the frame
-// is what a short game really looks like and the same seed always gives the same frame.
-import { FIELD, PLAYER, STEP } from './config.js';
-import { EVENT_OVER, KIND_BLOCK } from './world.js';
-import { SCREEN_OVER, SCREEN_PLAY, SCREEN_TITLE } from './render.js';
-
-const START_SECONDS = 5;
-const PLAY_SECONDS = 26;
-const END_LIMIT_SECONDS = 600;
-/**
- * How far ahead, in seconds, the autopilot checks each way it could move: the play scene's pilot
- * looks well ahead and keeps all its lives; the end scene's looks only a moment ahead, so it is
- * caught out once the blocks speed up, as a hurried player is.
- */
-const HORIZON_PLAY = 0.7;
-const HORIZON_END = 0.25;
-const SAMPLE = 1 / 30;
-const DIRECTIONS = [0, -1, 1];
-/** Extra room, each side, it keeps between the paddle and a block. */
-const MARGIN = 10;
-
-/** Seconds until moving in `direction` (-1, 0, 1) runs the paddle into a block; Infinity when it never does. */
-function timeToHit(state, direction, horizon) {
-  const player = state.player;
-  for (let t = SAMPLE; t <= horizon; t += SAMPLE) {
-    const x = Math.min(FIELD.width - player.width, Math.max(0, player.x + direction * PLAYER.speed * t));
-    for (let index = 0; index < state.items.length; index += 1) {
-      const item = state.items[index];
-      if (!item.active || item.kind !== KIND_BLOCK) continue;
-      const y = item.y + item.speed * t;
-      if (y + item.height > player.y && y < player.y + player.height && item.x < x + player.width + MARGIN && item.x + item.width > x - MARGIN) return t;
-    }
-  }
-  return Infinity;
+// Deterministic screenshot staging for ?shot=.
+// Each named shot rebuilds the world from a fixed seed, scripts it to a good moment,
+// and freezes it so the renderer can take an identical picture on every run.
+import { createWorld, stepWorld } from './world.js';
+import { LANDMARKS, SHOTS } from './config.js';
+function scriptedInput(actions, mouse) {
+  return {
+    move: () => actions,
+    sprint: () => false,
+    takeLook: () => ({ x: mouse.x ?? 0, y: mouse.y ?? 0 }),
+    takeZoom: () => 0,
+    attackHeld: () => false,
+    takeActions: () => 0,
+  };
 }
 
-/** Of the safe ways to move, the one toward the lowest coin (or the centre); else the one that is hit last. */
-function autopilot(state, horizon) {
-  const player = state.player;
-  let coin = null;
-  for (let index = 0; index < state.items.length; index += 1) {
-    const item = state.items[index];
-    if (item.active && item.kind !== KIND_BLOCK && (coin === null || item.y > coin.y)) coin = item;
-  }
-  const target = coin === null ? FIELD.width / 2 : coin.x + coin.width / 2;
-  const centre = player.x + player.width / 2;
-  const wanted = target > centre + 8 ? 1 : target < centre - 8 ? -1 : 0;
-  let best = wanted;
-  let bestTime = timeToHit(state, wanted, horizon);
-  for (let index = 0; index < DIRECTIONS.length && bestTime !== Infinity; index += 1) {
-    const time = timeToHit(state, DIRECTIONS[index], horizon);
-    if (time > bestTime) {
-      bestTime = time;
-      best = DIRECTIONS[index];
-    }
-  }
-  return best;
-}
+const NONE = { x: 0, y: 0 };
+const DRIVE = { x: 0, y: 1 }; // W: forward
 
-/**
- * Set `world` to the named scene (start, play or end; any other name is start) and return the
- * screen to draw over it and the best score to show.
- */
-export function stageShot(name, world) {
-  world.reset();
-  if (name !== 'play' && name !== 'end') {
-    for (let index = 0; index < START_SECONDS / STEP; index += 1) world.step(STEP, 0, true);
-    return { screen: SCREEN_TITLE, best: 0 };
+/** Stage one shot and return the world + screen it needs. */
+export function stageShot(name, canvasSize) {
+  const shot = SHOTS[name] || SHOTS.start;
+  const world = createWorld({ seed: shot.seed, shot: true });
+  const input = scriptedInput(DRIVE, NONE);
+  if (shot.kind === 'start') {
+    // Title screen: the player stands at the safehouse while traffic and peds live.
+    for (let i = 0; i < 300; i += 1) stepWorld(world, scriptedInput(NONE, NONE), 1 / 60);
+    return { world, screen: 'title' };
   }
-  const limit = name === 'end' ? END_LIMIT_SECONDS : PLAY_SECONDS;
-  const horizon = name === 'end' ? HORIZON_END : HORIZON_PLAY;
-  for (let index = 0; index < limit / STEP; index += 1) {
-    if (world.step(STEP, autopilot(world.state, horizon), false) & EVENT_OVER) break;
+  if (shot.kind === 'play') {
+    // A getaway: Kai in a sedan on the beach road, wanted 2, two units closing in.
+    world.setWanted(2);
+    const car = world.cars.find((c) => c.kind === 'sedan' && c.driver === null);
+    if (car) {
+      world.player.x = car.x + 2;
+      world.player.z = car.z;
+      world.enterCar();
+      car.x = -112;
+      car.z = -56;
+      car.heading = 0; // east along the coast road
+      car.speed = 24;
+      world.camYaw = 0;
+      world.player.heading = 0;
+    }
+    for (let i = 0; i < 180; i += 1) stepWorld(world, input, 1 / 60);
+    return { world, screen: 'play' };
   }
-  const over = world.state.lives === 0;
-  return { screen: over ? SCREEN_OVER : SCREEN_PLAY, best: world.state.score };
+  if (shot.kind === 'mission') {
+    // The warehouse shootout: Kai on foot, guards closing in, tracer in the air.
+    world.missionIndex = 5;
+    world.startMission(5);
+    // Clear the first step (reach the casino) so the kill step spawns its guards.
+    world.player.x = LANDMARKS.casino.x;
+    world.player.z = LANDMARKS.casino.z;
+    for (let i = 0; i < 30; i += 1) stepWorld(world, scriptedInput(NONE, NONE), 1 / 60);
+    // Take cover on the casino's south side and let the shootout start.
+    world.player.x = LANDMARKS.casino.x + 24;
+    world.player.z = LANDMARKS.casino.z + 24;
+    world.camYaw = Math.atan2(LANDMARKS.casino.z - world.player.z, LANDMARKS.casino.x - world.player.x);
+    for (let i = 0; i < 120; i += 1) stepWorld(world, scriptedInput(NONE, NONE), 1 / 60);
+    return { world, screen: 'play' };
+  }
+  // end: the wanted level caught up — BUSTED over the harbour.
+  world.setWanted(4);
+  world.player.x = 84;
+  world.player.z = 84;
+  world.endState = 'busted';
+  world.endKind = 'busted';
+  return { world, screen: 'over' };
 }

@@ -1,19 +1,143 @@
-<!doctype html>
+<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Block Dodger</title>
+<title>Solmar Bay — an open-world crime story</title>
 <style>
-  html, body { margin: 0; height: 100%; overflow: hidden; background: #11141b; }
+  :root {
+    --amber: #f2c230;
+    --teal: #2ec4b6;
+    --panel: rgba(12, 16, 22, 0.72);
+    --text: #f5efe2;
+    --muted: #c9c2b2;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #0c1016; font-family: system-ui, -apple-system, "Segoe UI", sans-serif; color: var(--text); }
   #game { position: fixed; inset: 0; width: 100%; height: 100%; display: block; touch-action: none; }
-  /* Read aloud, never shown: the status line screen readers announce. */
-  #status { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+  .hidden { display: none !important; }
+
+  /* ---- HUD ---- */
+  #hud { position: fixed; inset: 0; pointer-events: none; }
+  .panel { background: var(--panel); border-radius: 10px; padding: 8px 12px; backdrop-filter: blur(4px); }
+  #top-left { position: absolute; top: 14px; left: 14px; display: flex; flex-direction: column; gap: 6px; }
+  #cash { font-size: 22px; font-weight: 800; color: var(--amber); }
+  #rep { font-size: 13px; letter-spacing: 1px; color: var(--muted); }
+  #hp-wrap { width: 180px; height: 10px; background: rgba(255,255,255,0.18); border-radius: 5px; overflow: hidden; }
+  #hp-fill { height: 100%; width: 100%; background: linear-gradient(90deg, #37c978, #7be495); transition: width 0.2s; }
+  #top-right { position: absolute; top: 14px; right: 14px; text-align: right; display: flex; flex-direction: column; gap: 6px; align-items: flex-end; }
+  #stars { font-size: 26px; letter-spacing: 4px; color: var(--amber); text-shadow: 0 0 8px rgba(0,0,0,0.6); }
+  #stars.hot { color: #ff5533; }
+  #speed { font-size: 20px; font-weight: 700; }
+  #weapon { font-size: 13px; color: var(--muted); }
+  #minimap { width: 190px; height: 190px; border-radius: 10px; border: 2px solid rgba(255,255,255,0.25); background: #2e7fb8; }
+  #bottom-left { position: absolute; bottom: 16px; left: 14px; max-width: 420px; }
+  #objective { font-size: 16px; font-weight: 700; }
+  #objective-dist { font-size: 13px; color: var(--amber); margin-top: 2px; }
+  #mission-step { font-size: 13px; color: var(--muted); margin-top: 4px; }
+  #hint { position: absolute; bottom: 16px; left: 50%; transform: translateX(-50%); font-size: 14px; color: var(--text); background: var(--panel); padding: 6px 14px; border-radius: 20px; }
+  #message { position: absolute; bottom: 64px; left: 50%; transform: translateX(-50%); font-size: 15px; text-align: center; max-width: 640px; }
+  #crosshair { position: absolute; top: 50%; left: 50%; width: 18px; height: 18px; margin: -9px 0 0 -9px; display: none; }
+  #crosshair::before, #crosshair::after { content: ""; position: absolute; background: #fff; }
+  #crosshair::before { left: 8px; top: 0; width: 2px; height: 18px; }
+  #crosshair::after { left: 0; top: 8px; width: 18px; height: 2px; }
+  #mission-banner { position: absolute; top: 22%; left: 50%; transform: translateX(-50%) scale(0.96); text-align: center; opacity: 0; transition: opacity 0.3s, transform 0.3s; pointer-events: none; }
+  #mission-banner.show { opacity: 1; transform: translateX(-50%) scale(1); }
+  #mission-banner-title { font-size: 34px; font-weight: 900; letter-spacing: 2px; color: var(--amber); text-shadow: 0 2px 12px rgba(0,0,0,0.8); }
+  #mission-banner-text { font-size: 15px; color: var(--text); margin-top: 4px; text-shadow: 0 1px 6px rgba(0,0,0,0.8); }
+
+  /* ---- Screens ---- */
+  .screen { position: fixed; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; background: rgba(8, 10, 14, 0.55); backdrop-filter: blur(3px); text-align: center; padding: 24px; }
+  .screen h1 { font-size: 64px; margin: 0; letter-spacing: 6px; color: var(--amber); text-shadow: 0 4px 24px rgba(0,0,0,0.9); }
+  .screen h2 { font-size: 18px; font-weight: 400; color: var(--muted); margin: 8px 0 24px; }
+  .screen p { max-width: 560px; line-height: 1.6; color: var(--text); }
+  .controls { font-size: 14px; color: var(--muted); line-height: 1.9; margin: 12px 0 24px; }
+  .controls b { color: var(--text); }
+  button { pointer-events: auto; cursor: pointer; font: inherit; font-size: 17px; font-weight: 700; color: #14100a; background: var(--amber); border: none; border-radius: 10px; padding: 12px 28px; margin: 4px; }
+  button:hover { background: #ffd95e; }
+  button.ghost { background: transparent; color: var(--text); border: 2px solid rgba(255,255,255,0.4); }
+  button.ghost:hover { border-color: var(--text); }
+  #screen-title { font-size: 72px; letter-spacing: 8px; color: #ff5533; }
+  #screen-sub { font-size: 17px; color: var(--muted); }
+  #status { position: fixed; left: -9999px; width: 1px; height: 1px; overflow: hidden; }
+  @media (max-width: 700px) {
+    .screen h1 { font-size: 40px; }
+    #minimap { width: 130px; height: 130px; }
+    #mission-banner-title { font-size: 24px; }
+  }
 </style>
 </head>
 <body>
-<canvas id="game" aria-label="Block Dodger: move the paddle left and right to dodge falling blocks and catch coins"></canvas>
+<canvas id="game"></canvas>
+
+<div id="hud">
+  <div id="top-left">
+    <div class="panel"><span id="cash">$0</span> <span id="rep">REP 0</span></div>
+    <div id="hp-wrap"><div id="hp-fill"></div></div>
+  </div>
+  <div id="top-right">
+    <div id="stars">☆☆☆☆☆</div>
+    <canvas id="minimap" width="190" height="190"></canvas>
+    <div class="panel"><span id="speed">0 km/h</span> · <span id="weapon">Pistol</span></div>
+  </div>
+  <div id="bottom-left" class="panel">
+    <div id="objective">Welcome Back</div>
+    <div id="objective-dist"></div>
+    <div id="mission-step"></div>
+  </div>
+  <div id="hint"></div>
+  <div id="message"></div>
+  <div id="crosshair"></div>
+  <div id="mission-banner">
+    <div id="mission-banner-title"></div>
+    <div id="mission-banner-text"></div>
+  </div>
+</div>
+
+<div id="title-screen" class="screen">
+  <h1>SOLMAR BAY</h1>
+  <h2>Streets of the Sun — an open-world crime story</h2>
+  <p>Kai Reyes is home after five years away. The city took everything from him once.
+  This time he takes it back — one job, one car, one street at a time.</p>
+  <div class="controls">
+    <b>W A S D</b> move / drive &nbsp;·&nbsp; <b>Mouse</b> look &nbsp;·&nbsp; <b>Shift</b> sprint / handbrake<br>
+    <b>E</b> enter or steal a car &nbsp;·&nbsp; <b>Click</b> shoot &nbsp;·&nbsp; <b>Q</b> switch weapon &nbsp;·&nbsp; <b>R</b> reload<br>
+    <b>F</b> interact &nbsp;·&nbsp; <b>P / Esc</b> pause &nbsp;·&nbsp; <b>Wheel</b> camera zoom
+  </div>
+  <div>
+    <button id="start-button">New Game</button>
+    <button id="continue-button" class="ghost hidden">Continue</button>
+  </div>
+  <p style="font-size:13px;color:var(--muted)">Six story missions · taxis · hidden packages · wanted levels · your progress saves automatically.</p>
+</div>
+
+<div id="pause-screen" class="screen hidden">
+  <h1 style="font-size:44px">PAUSED</h1>
+  <h2>Solmar Bay waits for no one — except right now.</h2>
+  <div>
+    <button id="resume-button">Resume</button>
+    <button id="quit-button" class="ghost">Save &amp; quit to title</button>
+  </div>
+</div>
+
+<div id="over-screen" class="screen hidden">
+  <h1 id="screen-title">WASTED</h1>
+  <p id="screen-sub"></p>
+  <div>
+    <button id="respawn-button">Back on the streets</button>
+    <button id="title-button" class="ghost">Title screen</button>
+  </div>
+</div>
+
 <p id="status" role="status" aria-live="polite"></p>
+
+<script type="importmap">
+{
+  "imports": {
+    "three": "./vendor/three/three.module.min.js"
+  }
+}
+</script>
 <script type="module" src="./src/main.js"></script>
 </body>
 </html>
