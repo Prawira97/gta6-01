@@ -97,6 +97,12 @@ export function createCarState(city, random, kind, x, z, heading) {
     route: [],
     nodeIndex: 0,
     brake: false,
+    hp: 100,
+    lastImpact: 0,
+    drifting: false,
+    topSpeed: undefined,
+    holdAtEnd: false,
+    block: false,
     mesh: createCarMesh(kind, color),
     flash: 0,
   };
@@ -134,17 +140,25 @@ export function collideCircle(x, z, radius, colliders) {
 }
 
 /** Arcade car physics: throttle -1..1, steer -1..1, one fixed step. */
-export function stepCarPhysics(car, throttle, steerInput, dt, colliders) {
-  const maxSpeed = car.kind === 'police' ? CAR.policeSpeed : CAR.maxSpeed;
+export function stepCarPhysics(car, throttle, steerInput, dt, colliders, opts = {}) {
+  const maxSpeed = car.topSpeed ?? (car.kind === 'police' ? CAR.policeSpeed : CAR.maxSpeed);
+  const handbrake = !!opts.handbrake;
   if (throttle > 0) car.speed += CAR.accel * throttle * dt;
   else if (throttle < 0) car.speed += (car.speed > 0.5 ? -CAR.brake : CAR.accel * 0.6) * dt;
   else car.speed -= Math.sign(car.speed) * Math.min(Math.abs(car.speed), CAR.drag * 2.2 * dt);
+  if (handbrake) car.speed -= Math.sign(car.speed) * Math.min(Math.abs(car.speed), CAR.drag * CAR.handbrakeDrag * 4 * dt);
   car.speed = Math.max(-CAR.reverseMax, Math.min(maxSpeed, car.speed));
   const speedFactor = Math.min(1, Math.abs(car.speed) / 12);
-  car.heading += steerInput * CAR.steer * speedFactor * Math.sign(car.speed || 1) * dt;
+  // NPC cars that must follow a route (escort, mark) turn tighter than the
+  // player's car so a sharp corner does not throw them off the road into a block.
+  const steerMul = (car.steerMul ?? 1) * (handbrake ? CAR.handbrakeSteer : 1);
+  car.heading += steerInput * CAR.steer * steerMul * speedFactor * Math.sign(car.speed || 1) * dt;
+  car.drifting = handbrake && Math.abs(car.speed) > 10;
   const nx = car.x + Math.cos(car.heading) * car.speed * dt;
   const nz = car.z + Math.sin(car.heading) * car.speed * dt;
+  const speedBeforeHit = car.speed;
   const fixed = collideCircle(nx, nz, CAR.radius, colliders);
+  car.lastImpact = fixed.hit ? Math.abs(speedBeforeHit) : 0;
   if (fixed.hit && Math.abs(car.speed) > 4) car.speed *= 0.45;
   else if (fixed.hit) car.speed *= 0.8;
   car.x = fixed.x;
@@ -184,8 +198,18 @@ export function stepTraffic(car, dt, city, random, others) {
   const target = car.route[car.nodeIndex];
   const dist = Math.hypot(target.x - car.x, target.z - car.z);
   if (dist < 4) {
-    car.route[car.nodeIndex] = nextNode(city, random, target, car.heading);
-    car.nodeIndex = 0;
+    if (car.nodeIndex >= car.route.length - 1) {
+      if (car.holdAtEnd) {
+        // Arrived and holding: brake to a stop, do not pick a new node.
+        stepCarPhysics(car, -1, 0, dt, city.colliders);
+        return;
+      }
+      car.route[car.nodeIndex] = nextNode(city, random, target, car.heading);
+      car.nodeIndex = 0;
+    } else {
+      // Multi-node route (e.g. an escort's road path): walk it in order.
+      car.nodeIndex += 1;
+    }
   }
   // Brake for anything stopped in front of us.
   let blocked = false;

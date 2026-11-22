@@ -17,13 +17,21 @@ character, place and story is original.
 - **Open world** — a 9×9 city of streets, beach and docks to explore on
   foot and by car, with traffic, pedestrians, palms and a plaza fountain.
 - **Cars** — drive, steal and outrun the law in sedans, coupes and taxis;
-  parked cars face the road so they pull straight out.
+  parked cars face the road so they pull straight out. Shift is a handbrake
+  for drifts; hard hits damage your car (smoke and crawl) until Rosa's
+  Garage patches it up.
 - **Wanted system** — five stars; police cars and foot cops respond to
-  your crimes, chase you down and try to bust you. Lose them or lie low
-  and the heat cools off.
-- **Missions & story** — six story missions from Mara Solis, from
-  "Welcome Back" to "King of the Bay", plus taxi fares and 12 hidden
-  packages to find.
+  your crimes, chase you down and try to bust you. At three stars the PD
+  sets roadblocks across the road ahead; at higher stars the pursuit gets
+  faster and the foot cops shoot straighter. Lose them or lie low and the
+  heat cools off.
+- **Missions & story** — twelve story missions from Mara Solis and Rosa,
+  from "Welcome Back" to "Kane's Vault", with tailing, street racing, escort
+  and heist jobs, plus taxi fares and 20 hidden packages to find.
+- **Side activities** — a repeatable street race from Solmar Stadium (five
+  checkpoints against the clock) and courier gigs from Mercado del Sol.
+- **The city** — a 9×9 grid of streets with a stadium, a marina full of
+  boats, a market square and downtown towers, under a full day/night cycle.
 - **Combat** — pistol and SMG (unlocked in mission 4), enemy guards and a
   final boss, tracers and a health bar.
 - **Progression** — earn cash and reputation for missions, fares and
@@ -47,3 +55,10 @@ Serve locally with `node serve.ts`, then open http://localhost:8080.
 
 Deterministic screenshots: `?shot=start|play|mission|end&seed=1`
 (see `shots.json`).
+
+## Verify
+
+Headless simulation (no browser): `node tools/sim.mjs` — builds the world,
+checks determinism (same seed → identical state), plays through all 12 story
+missions, runs the street race and courier gig, and checks roadblocks and
+combat. Everything must print PASS.

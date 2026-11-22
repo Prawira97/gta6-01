@@ -1,7 +1,7 @@
 // The HUD: a thin DOM layer over the world state. It only writes text when a value
 // actually changed, so it stays cheap at 60 fps. All ids live in index.html.
 import { MISSIONS } from './missions.js';
-import { STEP, WANTED, WEAPONS } from './config.js';
+import { DAY_LENGTH, STEP, WANTED, WEAPONS } from './config.js';
 
 function $(id) {
   return document.getElementById(id);
@@ -25,6 +25,8 @@ export function createHud() {
     missionBanner: $('mission-banner'),
     missionBannerTitle: $('mission-banner-title'),
     missionBannerText: $('mission-banner-text'),
+    clock: $('clock'),
+    packages: $('packages'),
   };
   const last = {};
   let messageTimer = 0;
@@ -65,6 +67,10 @@ export function createHud() {
       const inGame = screen === 'play';
       setText(els.cash, 'cash', `$${Math.floor(world.cash).toLocaleString('en-US')}`);
       setText(els.rep, 'rep', `REP ${world.rep}`);
+      if (els.packages) {
+        const found = world.collectibles.filter((c) => c.taken).length;
+        setText(els.packages, 'packages', `PKG ${found}/${world.collectibles.length}`);
+      }
       if (els.hpFill) els.hpFill.style.width = `${Math.max(0, world.player.hp)}%`;
       const wanted = '★'.repeat(world.wanted.level) + '☆'.repeat(WANTED.max - world.wanted.level);
       setText(els.stars, 'stars', wanted);
@@ -93,7 +99,15 @@ export function createHud() {
         let hint = '';
         if (inGame && world.nearCar) hint = 'E — enter car';
         else if (inGame && world.playerCar) hint = 'E — exit car · Shift — handbrake';
+        if (inGame && world.nearActivity === 'race') hint = 'F — start street race';
+        else if (inGame && world.nearActivity === 'courier') hint = 'F — start courier gig';
         setText(els.hint, 'hint', hint);
+      }
+      if (els.clock) {
+        const hours = (8 + (world.time / DAY_LENGTH) * 24) % 24;
+        const hh = Math.floor(hours);
+        const mm = Math.floor((hours - hh) * 60);
+        setText(els.clock, 'clock', `${String(hh).padStart(2, '0')}:${String(mm).padStart(2, '0')}`);
       }
       if (els.screenTitle) {
         const [title, sub] = screen === 'over'
@@ -102,12 +116,24 @@ export function createHud() {
         setText(els.screenTitle, 'screen-title', title);
         setText(els.screenSub, 'screen-sub', sub);
       }
-      // Step indicator under the objective.
+      // Step indicator under the objective: mission step + progress, race/courier clocks.
       const stepEl = $('mission-step');
-      if (stepEl && world.mission && world.mission.active) {
-        const def = MISSIONS[world.mission.index];
-        const step = def ? def.steps[world.mission.step] : null;
-        setText(stepEl, 'mission-step', step && step.text ? `▸ ${step.text}` : '');
+      if (stepEl) {
+        let line = '';
+        if (world.mission && world.mission.active) {
+          const def = MISSIONS[world.mission.index];
+          const step = def ? def.steps[world.mission.step] : null;
+          const timed = step && ['escape', 'timed', 'race'].includes(step.type) && world.mission.timer > 0;
+          const timer = timed ? ` · ${Math.ceil(world.mission.timer)}s` : '';
+          line = step && step.text ? `▸ ${step.text} — ${world.mission.index + 1}/${MISSIONS.length}${timer}` : '';
+        } else if (world.activities.race.state === 'running') {
+          const race = world.activities.race;
+          line = `Race checkpoint ${race.idx + 1}/${race.points.length} · ${Math.ceil(race.timer)}s`;
+        } else if (world.activities.courier.state === 'running') {
+          const courier = world.activities.courier;
+          line = `Courier drop ${courier.idx + 1}/${courier.drops.length} · ${Math.ceil(courier.timer)}s`;
+        }
+        setText(stepEl, 'mission-step', line);
       }
     },
   };

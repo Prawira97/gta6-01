@@ -1,7 +1,8 @@
 // The story of Solmar Bay: Kai Reyes, a wheelman back in town, works for the fixer Mara
-// Solis against the dock boss Victor Kane. Six missions, one after the other, each a list of
-// steps. A step is plain data; the runner checks it against the game state the world hands
-// it and reports what happened, so the story stays data and the world stays the machine.
+// Solis — and for the mechanic Rosa — against the dock boss Victor Kane. Twelve missions,
+// one after the other, each a list of steps. A step is plain data; the runner checks it
+// against the game state the world hands it and reports what happened, so the story stays
+// data and the world stays the machine.
 //
 // Step types:
 //   goto      reach a point (on foot or in a car)      {at, radius, text}
@@ -12,7 +13,11 @@
 //   kill      kill N spawned enemies                   {count, at, text}
 //   escape    reach a point before the timer ends      {at, radius, seconds, text}
 //   talk      meet a character at a point              {at, radius, text, line}
-import { LANDMARKS } from './config.js';
+//   timed     reach a point before the timer ends      {at, radius, seconds, text, wanted?}
+//   tail      follow a moving mark car, unseen         {at, radius, seconds, tooClose, tooFar, text}
+//   race      hit checkpoints in order, beat the clock {points, seconds, text}
+//   escort    stay with a friendly car to its stop    {at, dest, radius, text, guards}
+import { LANDMARKS, RACE } from './config.js';
 
 export const MISSIONS = [
   {
@@ -81,7 +86,78 @@ export const MISSIONS = [
       { type: 'kill', count: 6, at: LANDMARKS.casino, radius: 30, text: 'Take down Kane and his guards', boss: true },
     ],
   },
+  {
+    id: 'night-run',
+    title: 'Night Run',
+    giver: 'Mara Solis',
+    briefing: 'A crate came in at the docks after dark. Pick it up and run it to the casino in two and a half minutes — the PD is already sniffing around.',
+    reward: { cash: 700, rep: 20 },
+    steps: [
+      { type: 'pickup', at: LANDMARKS.docks, radius: 14, text: 'Pick up the crate at the docks' },
+      { type: 'timed', at: LANDMARKS.casino, radius: 13, seconds: 150, wanted: 1, text: 'Deliver the crate to the casino — fast' },
+    ],
+  },
+  {
+    id: 'tail-the-lieutenant',
+    title: 'Tail the Lieutenant',
+    giver: 'Mara Solis',
+    briefing: 'Kane\'s lieutenant drives from the casino to the warehouse every night. Follow him in your car — close enough to see, far enough not to be seen.',
+    reward: { cash: 900, rep: 22 },
+    steps: [
+      { type: 'goto', at: LANDMARKS.casino, radius: 16, text: 'Wait by the casino for the lieutenant' },
+      { type: 'tail', at: LANDMARKS.casino, radius: 10, seconds: 25, tooClose: 8, tooFar: 45, text: 'Tail the lieutenant — stay in the 8–45 m band' },
+      { type: 'goto', at: LANDMARKS.warehouse, radius: 16, text: 'See where he goes — Warehouse 7' },
+    ],
+  },
+  {
+    id: 'street-king',
+    title: 'Street King',
+    giver: 'Rosa',
+    briefing: 'Rosa set up a street race across the whole city — five checkpoints, two minutes. Beat the clock and the bay will know your name.',
+    reward: { cash: 1100, rep: 25 },
+    steps: [
+      { type: 'race', points: RACE.points, seconds: 120, text: 'Race the checkpoints — beat the clock' },
+    ],
+  },
+  {
+    id: 'rosas-convoy',
+    title: "Rosa's Convoy",
+    giver: 'Rosa',
+    briefing: 'Rosa\'s tow truck is hauling a "borrowed" engine to the docks and Kane\'s boys want it back. Stay with the truck until it docks.',
+    reward: { cash: 1300, rep: 28 },
+    steps: [
+      { type: 'escort', at: LANDMARKS.garage, dest: LANDMARKS.docks, radius: 24, guards: 2, text: 'Escort Rosa\'s truck to the docks' },
+    ],
+  },
+  {
+    id: 'payback-at-the-docks',
+    title: 'Payback at the Docks',
+    giver: 'Mara Solis',
+    briefing: 'Kane\'s crew moved the money to the docks. Take it back — clear the guards, grab the cash, bring it home.',
+    reward: { cash: 1600, rep: 32 },
+    steps: [
+      { type: 'kill', count: 5, at: LANDMARKS.docks, radius: 30, text: 'Clear the guards at the docks' },
+      { type: 'pickup', at: LANDMARKS.docks, radius: 10, text: 'Grab the cash' },
+      { type: 'deliver', at: LANDMARKS.home, radius: 11, text: 'Bring the cash to the safehouse' },
+    ],
+  },
+  {
+    id: 'kanes-vault',
+    title: "Kane's Vault",
+    giver: 'Mara Solis',
+    briefing: 'Rico, Kane\'s right hand, is guarding the casino vault tonight. End it, take the vault cash, and lose the whole department on the way home.',
+    reward: { cash: 3000, rep: 60 },
+    steps: [
+      { type: 'goto', at: LANDMARKS.casino, radius: 16, text: 'Reach the casino' },
+      { type: 'kill', count: 6, at: LANDMARKS.casino, radius: 30, text: 'Take down Rico and his guards', boss: true },
+      { type: 'pickup', at: LANDMARKS.casino, radius: 10, text: 'Empty the vault' },
+      { type: 'escape', at: LANDMARKS.home, radius: 11, seconds: 150, wanted: 4, text: 'Lose the cops and reach the safehouse' },
+    ],
+  },
 ];
+
+/** How many story missions the game has (the world and the HUD read this, never a literal). */
+export const MISSION_COUNT = MISSIONS.length;
 
 /** Fresh mission progress: nothing started, nothing done. */
 export function createMissionState() {
@@ -92,6 +168,10 @@ export function createMissionState() {
     kills: 0,
     timer: 0,
     started: false,
+    checkpoint: 0,
+    tailTime: 0,
+    lostTime: 0,
+    warned: false,
   };
 }
 
@@ -102,6 +182,15 @@ export function currentObjective(missionState) {
   if (!mission) return null;
   const step = mission.steps[missionState.step];
   if (!step) return null;
+  if (step.type === 'race') {
+    const point = step.points[missionState.checkpoint ?? 0];
+    if (!point) return null;
+    return {
+      text: `Race checkpoint ${(missionState.checkpoint ?? 0) + 1}/${step.points.length}`,
+      at: point,
+      mission: mission.title,
+    };
+  }
   return { text: step.text, at: step.at ?? null, mission: mission.title };
 }
 
@@ -127,6 +216,24 @@ export function updateMission(missionState, game) {
     if (step.type === 'escape') {
       missionState.timer = step.seconds;
       game.setWanted(step.wanted ?? 3);
+    }
+    if (step.type === 'timed') {
+      missionState.timer = step.seconds;
+      if (step.wanted) game.setWanted(step.wanted);
+    }
+    if (step.type === 'race') {
+      missionState.checkpoint = 0;
+      missionState.timer = step.seconds;
+    }
+    if (step.type === 'tail') {
+      game.spawnMarkCar(step.at);
+      missionState.tailTime = 0;
+      missionState.lostTime = 0;
+      missionState.warned = false;
+    }
+    if (step.type === 'escort') {
+      game.spawnEscortCar(step.at, step.dest);
+      if (step.guards) game.spawnEnemies(step.at, step.guards, false);
     }
   }
 
@@ -169,6 +276,68 @@ export function updateMission(missionState, game) {
         return fail(missionState, game);
       }
       break;
+    case 'timed':
+      missionState.timer -= game.dt;
+      if (dist <= step.radius) return advance(missionState, game);
+      if (missionState.timer <= 0) {
+        game.message('Too slow — the drop went cold. Try again.');
+        return fail(missionState, game);
+      }
+      break;
+    case 'race': {
+      missionState.timer -= game.dt;
+      const point = step.points[missionState.checkpoint ?? 0];
+      if (!point) return advance(missionState, game);
+      const d = Math.hypot(player.x - point.x, player.z - point.z);
+      if (d <= (step.checkpointRadius ?? 12)) {
+        missionState.checkpoint += 1;
+        if (missionState.checkpoint >= step.points.length) return advance(missionState, game);
+        game.message(`Checkpoint ${missionState.checkpoint}/${step.points.length}`);
+      }
+      if (missionState.timer <= 0) {
+        game.message('Out of time — the race is lost. Try again.');
+        return fail(missionState, game);
+      }
+      break;
+    }
+    case 'tail': {
+      const mark = game.markCar;
+      if (!mark) return fail(missionState, game);
+      const d = Math.hypot(player.x - mark.x, player.z - mark.z);
+      const tooClose = step.tooClose ?? 8;
+      const tooFar = step.tooFar ?? 45;
+      if (d < tooClose) {
+        missionState.lostTime = 0;
+        if (!missionState.warned) {
+          missionState.warned = true;
+          game.message('Too close — back off!');
+        }
+      } else if (d <= tooFar) {
+        missionState.warned = false;
+        missionState.tailTime += game.dt;
+        missionState.lostTime = 0;
+      } else {
+        missionState.warned = false;
+        missionState.lostTime += game.dt;
+        if (missionState.lostTime > 5) {
+          game.message('You lost the mark. Try again.');
+          return fail(missionState, game);
+        }
+      }
+      if (missionState.tailTime >= step.seconds) return advance(missionState, game);
+      break;
+    }
+    case 'escort': {
+      const esc = game.escortCar;
+      if (!esc) return fail(missionState, game);
+      const dDest = Math.hypot(esc.x - step.dest.x, esc.z - step.dest.z);
+      const dPlayer = Math.hypot(player.x - esc.x, player.z - esc.z);
+      if (dDest <= step.radius) {
+        if (dPlayer <= 35) return advance(missionState, game);
+        game.message('The truck is waiting — get close to it.');
+      }
+      break;
+    }
     default:
       break;
   }
@@ -179,6 +348,9 @@ function advance(missionState, game) {
   const mission = MISSIONS[missionState.index];
   missionState.step += 1;
   missionState.started = false;
+  // A finished timed/race step leaves a stale timer behind; clear it so the HUD
+  // never shows the old countdown on the next step.
+  missionState.timer = 0;
   if (missionState.step >= mission.steps.length) {
     missionState.active = false;
     missionState.step = 0;
@@ -196,6 +368,10 @@ function fail(missionState, game) {
   missionState.step = 0;
   missionState.started = false;
   missionState.kills = 0;
+  missionState.checkpoint = 0;
+  missionState.tailTime = 0;
+  missionState.lostTime = 0;
+  missionState.warned = false;
   return 'fail';
 }
 
@@ -208,6 +384,10 @@ export function startMission(missionState, index, game) {
   missionState.active = true;
   missionState.started = false;
   missionState.kills = 0;
+  missionState.checkpoint = 0;
+  missionState.tailTime = 0;
+  missionState.lostTime = 0;
+  missionState.warned = false;
   game.message(`${mission.title} — ${mission.briefing}`);
   return true;
 }

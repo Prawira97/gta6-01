@@ -8,6 +8,8 @@ export function loadSave() {
     if (!raw) return null;
     const data = JSON.parse(raw);
     if (!data || typeof data.cash !== 'number' || typeof data.missionIndex !== 'number') return null;
+    // Versioned saves: v1 had no version field; anything else is from the future.
+    if (data.version !== undefined && data.version !== 2) return null;
     return data;
   } catch {
     return null;
@@ -19,6 +21,7 @@ export function saveGame(state) {
   if (state.shotMode) return false;
   try {
     window.localStorage.setItem(SAVE_KEY, JSON.stringify({
+      version: 2,
       cash: state.cash,
       rep: state.rep,
       missionIndex: state.missionIndex,
@@ -26,6 +29,8 @@ export function saveGame(state) {
       collectibles: state.collectibles.filter((c) => c.taken)
         .map((c) => `${Math.round(c.x)},${Math.round(c.z)}`),
       hasSmg: state.hasSmg,
+      raceBest: state.raceBest ?? null,
+      courierDone: state.courierDone ?? 0,
       player: { x: state.player.x, z: state.player.z },
       time: state.time,
     }));

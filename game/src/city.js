@@ -1,7 +1,7 @@
 // The city of Solmar Bay: a seeded 9x9 road grid with building plots, landmark plots,
 // collision boxes, trees, lamps and collectible spots. Everything the simulation needs is
 // plain data here; render.js turns it into three.js meshes.
-import { CITY, LANDMARKS, PALETTE } from './config.js';
+import { CITY, COLLECTIBLES, LANDMARKS, PALETTE } from './config.js';
 import { pick, range } from './random.js';
 
 /** Block (i, j) centre in world metres. i, j in 0..7. */
@@ -36,6 +36,34 @@ export function randomIntersection(random) {
   return { x: pick(random, lines), z: pick(random, lines) };
 }
 
+/** The road-line coordinate nearest to a value. */
+export function nearestLine(v) {
+  const lines = roadLines();
+  let best = lines[0];
+  for (const l of lines) if (Math.abs(l - v) < Math.abs(best - v)) best = l;
+  return best;
+}
+
+/** Nearest road intersection to a point. */
+export function nearestIntersection(p) {
+  return { x: nearestLine(p.x), z: nearestLine(p.z) };
+}
+
+/** Manhattan road path from `from` to `to`: nearest intersections, x-leg then z-leg.
+ * Every leg runs straight along a road, so a car following it never cuts a block.
+ * The last point is the real destination: landmark blocks are open ground, so the
+ * final short leg into the block is clear. */
+export function gridPath(from, to) {
+  const a = nearestIntersection(from);
+  const b = nearestIntersection(to);
+  const points = [{ x: a.x, z: a.z }];
+  if (a.x !== b.x) points.push({ x: b.x, z: a.z });
+  if (a.z !== b.z) points.push({ x: b.x, z: b.z });
+  const last = points[points.length - 1];
+  if (last.x !== to.x || last.z !== to.z) points.push({ x: to.x, z: to.z });
+  return points;
+}
+
 /** A random point on a sidewalk (just off a road) from the seeded generator. */
 export function randomSidewalkPoint(random) {
   const lines = roadLines();
@@ -57,6 +85,8 @@ const RESERVED = {
   '4,3': 'plaza',
   '3,4': 'plaza',
   '4,4': 'plaza',
+  '2,0': 'stadium',
+  '5,5': 'market',
 };
 
 export function buildCity(seed) {
@@ -86,7 +116,7 @@ export function buildCity(seed) {
       if (RESERVED[key]) continue;
       const c = blockCentre(i, j);
       const distCentre = Math.hypot(c.x, c.z);
-      const tall = 1 + Math.max(0, 1 - distCentre / 320) * 1.6;
+      const tall = 1 + Math.max(0, 1 - distCentre / 320) * 2.0;
       const count = random() < 0.55 ? 1 : 2;
       for (let b = 0; b < count; b += 1) {
         const w = range(random, 14, 26);
@@ -94,7 +124,7 @@ export function buildCity(seed) {
         const h = range(random, 8, 20) * tall + (random() < 0.08 ? 26 : 0);
         const ox = count === 1 ? 0 : (b === 0 ? -9 : 9);
         const oz = count === 1 ? 0 : (b === 0 ? 9 : -9);
-        addBuilding(c.x + ox, c.z + oz, w, d, Math.min(h, 64), pick(random, PALETTE.building));
+        addBuilding(c.x + ox, c.z + oz, w, d, Math.min(h, 72), pick(random, PALETTE.building));
       }
       // A tree or two on most blocks, and a lamp on the corner.
       if (random() < 0.7) trees.push({ x: c.x + range(random, -16, 16), z: c.z + range(random, -16, 16), s: range(random, 0.8, 1.3) });
@@ -110,8 +140,16 @@ export function buildCity(seed) {
     { name: 'hospital', x: LANDMARKS.hospital.x, z: LANDMARKS.hospital.z, w: 28, d: 20, h: 18, color: '#f2e3c6' },
     { name: 'policeStation', x: LANDMARKS.policeStation.x, z: LANDMARKS.policeStation.z, w: 26, d: 18, h: 14, color: '#a8c8d8' },
     { name: 'home', x: LANDMARKS.home.x, z: LANDMARKS.home.z, w: 16, d: 12, h: 8, color: '#c9e0a8' },
+    { name: 'stadium', x: LANDMARKS.stadium.x, z: LANDMARKS.stadium.z, w: 44, d: 30, h: 10, color: '#7ab8c9' },
   ];
   for (const s of landmarkStructures) addBuilding(s.x, s.z, s.w, s.d, s.h, s.color);
+
+  // Market stalls around Mercado del Sol.
+  const stallColors = ['#e84a5f', '#e8a13a', '#50c878', '#4a90d8', '#9a6ad8', '#e8e8e8'];
+  for (let k = 0; k < 6; k += 1) {
+    const a = (k / 6) * Math.PI * 2;
+    addBuilding(LANDMARKS.market.x + Math.cos(a) * 14, LANDMARKS.market.z + Math.sin(a) * 14, 5, 5, 3.5, stallColors[k]);
+  }
 
   // Dock crates on the docks plot.
   for (let k = 0; k < 6; k += 1) {
@@ -135,12 +173,18 @@ export function buildCity(seed) {
   // Collectible spots: rooftops' worth of gold, spread over the city.
   const collectibleSpots = [];
   const seen = new Set();
-  while (collectibleSpots.length < 12) {
+  while (collectibleSpots.length < COLLECTIBLES) {
     const p = randomSidewalkPoint(random);
     const key = `${Math.round(p.x / 10)},${Math.round(p.z / 10)}`;
     if (seen.has(key)) continue;
     seen.add(key);
     collectibleSpots.push(p);
+  }
+
+  // Docked boats in the marina, east of the boardwalk — in the water past the beach.
+  const boats = [];
+  for (let k = 0; k < 5; k += 1) {
+    boats.push({ x: CITY.waterX + 36 + (k % 2) * 22, z: LANDMARKS.marina.z - 20 + k * 72, heading: Math.PI / 2, len: 14 + (k % 2) * 6 });
   }
 
   return {
@@ -150,6 +194,7 @@ export function buildCity(seed) {
     trees,
     lamps,
     collectibleSpots,
+    boats,
     landmarks: LANDMARKS,
     ground: CITY.ground,
     beachX: CITY.beachX,

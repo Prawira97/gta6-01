@@ -110,6 +110,16 @@ export function createAudio() {
     shot() { noiseBurst(0.12, 0.5, 1800); tone(160, 0.1, 0.3, 'square'); },
     enemyShot() { noiseBurst(0.1, 0.25, 1200); },
     pickup() { tone(660, 0.09, 0.25); window.setTimeout(() => tone(990, 0.14, 0.25), 90); },
+    checkpoint() { tone(880, 0.08, 0.25); window.setTimeout(() => tone(1174, 0.12, 0.25), 80); },
+    raceGo() {
+      tone(440, 0.1, 0.25, 'square');
+      window.setTimeout(() => tone(440, 0.1, 0.25, 'square'), 140);
+      window.setTimeout(() => tone(880, 0.2, 0.3, 'square'), 280);
+    },
+    roadblock() {
+      tone(620, 0.16, 0.25, 'square');
+      window.setTimeout(() => tone(470, 0.16, 0.25, 'square'), 170);
+    },
     crash() { noiseBurst(0.25, 0.4, 500); },
     click() { tone(440, 0.05, 0.2, 'square'); },
     missionDone() {

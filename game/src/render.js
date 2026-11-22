@@ -2,9 +2,10 @@
 // trees, cars and people — plus the chase camera and the 2D minimap. It only paints the
 // world state; it never simulates. Every mesh it moves belongs to the world's plain state.
 import * as THREE from 'three';
-import { CITY, LANDMARKS, PALETTE } from './config.js';
+import { CITY, DAY_LENGTH, LANDMARKS, PALETTE } from './config.js';
 import { roadLines } from './city.js';
 import { animatePerson } from './people.js';
+import { createParticleCloud } from './effects.js';
 
 const TAU = Math.PI * 2;
 
@@ -62,7 +63,12 @@ export function createRenderer(canvas, city, minimapCanvas) {
   const sun = new THREE.DirectionalLight(PALETTE.sun, PALETTE.sunIntensity);
   sun.position.set(140, 190, 80);
   scene.add(sun);
-  scene.add(new THREE.HemisphereLight(PALETTE.hemiSky, PALETTE.hemiGround, PALETTE.hemiIntensity));
+  const hemi = new THREE.HemisphereLight(PALETTE.hemiSky, PALETTE.hemiGround, PALETTE.hemiIntensity);
+  scene.add(hemi);
+  const skyDay = new THREE.Color(PALETTE.sky);
+  const skyNight = new THREE.Color(0x0e1a2e);
+  const fogDay = new THREE.Color(PALETTE.fog);
+  const fogNight = new THREE.Color(0x1a2436);
 
   // Ground, sidewalks, roads, beach and sea.
   const groundMat = new THREE.MeshStandardMaterial({ color: 0xb8a88e, roughness: 1 });
@@ -172,6 +178,39 @@ export function createRenderer(canvas, city, minimapCanvas) {
   });
   lampMesh.instanceMatrix.needsUpdate = true;
   scene.add(lampMesh);
+
+  // Lamp heads: warm glow that only shows at dusk and night.
+  const lampHeadMesh = new THREE.InstancedMesh(
+    new THREE.SphereGeometry(0.28, 8, 6),
+    new THREE.MeshBasicMaterial({ color: 0xffd27a }),
+    city.lamps.length,
+  );
+  city.lamps.forEach((lamp, i) => {
+    pos.set(lamp.x, 5.1, lamp.z);
+    scale.set(1, 1, 1);
+    matrix.compose(pos, quat, scale);
+    lampHeadMesh.setMatrixAt(i, matrix);
+  });
+  lampHeadMesh.instanceMatrix.needsUpdate = true;
+  scene.add(lampHeadMesh);
+
+  // Marina boats: hull, deck and cabin, one group each.
+  const hullMat = new THREE.MeshStandardMaterial({ color: 0x2a4a6a, roughness: 0.6 });
+  const deckMat = new THREE.MeshStandardMaterial({ color: 0xe8e8e8, roughness: 0.7 });
+  for (const boat of city.boats || []) {
+    const hull = new THREE.Mesh(new THREE.BoxGeometry(boat.len, 1.6, 4), hullMat);
+    hull.position.set(boat.x, 0.8, boat.z);
+    hull.rotation.y = -boat.heading;
+    scene.add(hull);
+    const deck = new THREE.Mesh(new THREE.BoxGeometry(boat.len * 0.7, 0.8, 3), deckMat);
+    deck.position.set(boat.x, 1.9, boat.z);
+    deck.rotation.y = -boat.heading;
+    scene.add(deck);
+  }
+
+  // Particles: one Points cloud for sparks, smoke and sparkles.
+  const particleCloud = createParticleCloud();
+  scene.add(particleCloud.points);
 
   // Plaza fountain and the dock pier.
   const fountain = new THREE.Mesh(
@@ -298,6 +337,30 @@ export function createRenderer(canvas, city, minimapCanvas) {
       minimap.closePath();
       minimap.fill();
     }
+    // Side-activity markers: next race checkpoint (orange), next courier drop
+    // (green), and the packages still out there (small gold dots).
+    const race = world.activities?.race;
+    if (race && race.state === 'running' && race.points[race.idx]) {
+      const [rx, ry] = toMap(race.points[race.idx].x, race.points[race.idx].z);
+      minimap.fillStyle = '#ff8c1a';
+      minimap.beginPath();
+      minimap.arc(rx, ry, 4, 0, TAU);
+      minimap.fill();
+    }
+    const courier = world.activities?.courier;
+    if (courier && courier.state === 'running' && courier.drops[courier.idx]) {
+      const [dx, dy] = toMap(courier.drops[courier.idx].x, courier.drops[courier.idx].z);
+      minimap.fillStyle = '#2ec4b6';
+      minimap.fillRect(dx - 3, dy - 3, 6, 6);
+    }
+    minimap.fillStyle = '#f2c230';
+    for (const c of world.collectibles || []) {
+      if (c.taken) continue;
+      const [cx, cy] = toMap(c.x, c.z);
+      minimap.beginPath();
+      minimap.arc(cx, cy, 1.5, 0, TAU);
+      minimap.fill();
+    }
     // Police blips.
     minimap.fillStyle = '#ff2233';
     for (const car of world.policeCars) {
@@ -330,6 +393,17 @@ export function createRenderer(canvas, city, minimapCanvas) {
     },
     /** Paint the world for one screen: 'title' | 'play' | 'paused' | 'over'. */
     draw(world, screen, time) {
+      // Day/night: the sun circles once per DAY_LENGTH seconds; staged shots pass a
+      // fixed time, so their light is identical on every run.
+      const phase = ((time / DAY_LENGTH) + 0.25) % 1;
+      const sunH = Math.sin(phase * TAU);
+      const dayF = Math.max(0, Math.min(1, (sunH + 0.05) / 0.3));
+      scene.background.lerpColors(skyNight, skyDay, dayF);
+      scene.fog.color.lerpColors(fogNight, fogDay, dayF);
+      sun.intensity = 0.15 + dayF * 2.45;
+      sun.position.set(Math.cos(phase * TAU) * 180, 60 + Math.max(0, sunH) * 140, 80);
+      hemi.intensity = 0.25 + dayF * 0.65;
+      lampHeadMesh.visible = dayF < 0.4;
       const p = world.player;
       const forward = { x: Math.cos(world.camYaw), z: Math.sin(world.camYaw) };
       if (screen === 'title') {
@@ -396,6 +470,8 @@ export function createRenderer(canvas, city, minimapCanvas) {
       tracerGeo.setDrawRange(0, n * 2);
       tracerGeo.attributes.position.needsUpdate = true;
       tracerLines.material.opacity = 0.9;
+      // Particles (sparks, smoke, sparkles).
+      particleCloud.sync(world.particles);
 
       renderer.render(scene, camera);
       drawMinimap(world);

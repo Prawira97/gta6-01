@@ -2,14 +2,16 @@
 // car, traffic, pedestrians, police, enemies, missions, taxi fares, collectibles, the wanted
 // level, cash and reputation. The renderer only paints this state; the HUD only reads it.
 import { CAR, LANDMARKS, PLAYER, STEP, WANTED, WEAPONS } from './config.js';
-import { buildCity, nearestRoadPoint, randomIntersection, randomSidewalkPoint } from './city.js';
+import { buildCity, gridPath, nearestRoadPoint, randomIntersection, randomSidewalkPoint } from './city.js';
 import { createRandom, range } from './random.js';
 import { ACTION_CONFIRM, ACTION_ENTER, ACTION_INTERACT, ACTION_PAUSE, ACTION_RELOAD, ACTION_WEAPON } from './input.js';
 import { createCarState, collideCircle, recolorCar, separateCars, stepCarPhysics, stepTraffic } from './vehicles.js';
 import { createPedState, stepPed } from './people.js';
 import { addCrime, createWanted, spawnFootCop, spawnPoliceCar, stepFootCop, stepPoliceCar, stepWanted, wantedCarCount } from './police.js';
 import { fireShot } from './combat.js';
-import { createMissionState, currentObjective, startMission, updateMission } from './missions.js';
+import { createMissionState, currentObjective, startMission, updateMission, MISSION_COUNT, MISSIONS } from './missions.js';
+import { createActivities, courierStartPoint, raceStartPoint, startCourier, startStreetRace, stepActivities } from './activities.js';
+import { spawnBurst, stepParticles } from './effects.js';
 import { hasSave, loadSave, saveGame } from './save.js';
 
 const TAU = Math.PI * 2;
@@ -30,7 +32,8 @@ export function createWorld(options = {}) {
     seed,
     random,
     city,
-    time: 0,
+    // A loaded save resumes the day/night clock where it left off.
+    time: saved?.time ?? 0,
     cash: saved?.cash ?? 500,
     rep: saved?.rep ?? 0,
     missionIndex: saved?.missionIndex ?? 0,
@@ -70,10 +73,20 @@ export function createWorld(options = {}) {
     endState: null,
     missionDelay: 0,
     kills: 0,
+    activities: createActivities(),
+    markCar: null,
+    escortCar: null,
+    roadblock: { active: false, cars: [], timer: 0, cooldown: 0 },
+    particles: [],
+    raceBest: saved?.raceBest ?? null,
+    courierDone: saved?.courierDone ?? 0,
   };
 
   // Shot staging never touches the player's real save.
   world.shotMode = !!options.shot;
+
+  // A loaded save's best race time belongs to the activity that shows it.
+  world.activities.race.best = world.raceBest;
 
   // Traffic cars on the roads.
   for (let i = 0; i < 14; i += 1) {
@@ -107,7 +120,7 @@ export function createWorld(options = {}) {
   }
 
   world.mission.index = world.missionIndex;
-  if (world.missionIndex < 6) {
+  if (world.missionIndex < MISSION_COUNT) {
     startMission(world.mission, world.missionIndex, missionFacade(world));
   } else {
     world.mission.active = false;
@@ -141,7 +154,12 @@ function missionFacade(world) {
     get targetCar() { return world.targetCar; },
     get playerCar() { return world.playerCar; },
     get dt() { return STEP; },
+    get time() { return world.time; },
+    get markCar() { return world.markCar; },
+    get escortCar() { return world.escortCar; },
     spawnEnemies: (at, count, boss) => spawnEnemies(world, at, count, boss),
+    spawnMarkCar: (at) => spawnMarkCar(world, at),
+    spawnEscortCar: (at, dest) => spawnEscortCar(world, at, dest),
     setWanted: (n) => { world.wanted.level = n; world.wanted.heat = 20; },
     message: (text) => addMessage(world, text),
     sound: (name) => { world.pendingSound = name; },
@@ -175,6 +193,73 @@ function ensureTargetCar(world) {
   car.driver = null;
   world.cars.push(car);
   world.targetCar = car;
+}
+
+/** The mark car for a tail step: a plain white sedan that wanders the road grid. */
+function spawnMarkCar(world, at) {
+  const car = createCarState(world.city, world.random, 'sedan', at.x + 10, at.z + 6, 0);
+  recolorCar(car, 0xe8e8e8);
+  car.driver = 'npc';
+  car.steerMul = CAR.npcSteerMul;
+  car.route = [
+    randomIntersection(world.random),
+    randomIntersection(world.random),
+    randomIntersection(world.random),
+    randomIntersection(world.random),
+  ];
+  car.nodeIndex = 0;
+  world.cars.push(car);
+  world.markCar = car;
+  return car;
+}
+
+/** The escort car: drives to `dest` and holds there until the player catches up.
+ * It follows the road grid (Manhattan path) — a straight beeline would cut through
+ * buildings and strand the truck, which stalled the mission. */
+function spawnEscortCar(world, at, dest) {
+  const car = createCarState(world.city, world.random, 'sedan', at.x, at.z, 0);
+  recolorCar(car, 0x4ad8a0);
+  car.driver = 'npc';
+  car.steerMul = CAR.npcSteerMul;
+  car.route = gridPath(at, dest);
+  car.nodeIndex = 0;
+  car.holdAtEnd = true;
+  world.cars.push(car);
+  world.escortCar = car;
+  return car;
+}
+
+/** Take the mission's mark/escort cars off the streets when the mission ends. */
+function cleanupMissionCars(world) {
+  for (const key of ['markCar', 'escortCar']) {
+    const car = world[key];
+    if (!car) continue;
+    const i = world.cars.indexOf(car);
+    if (i >= 0) world.cars.splice(i, 1);
+    world[key] = null;
+  }
+}
+
+/** Two police cars parked across the road ahead of the player: a roadblock. */
+function spawnRoadblock(world) {
+  const p = world.player;
+  const fx = Math.cos(p.heading);
+  const fz = Math.sin(p.heading);
+  const cx = p.x + fx * 45;
+  const cz = p.z + fz * 45;
+  for (const side of [-7, 7]) {
+    const car = createCarState(world.city, world.random, 'police', cx - fz * side, cz + fx * side, p.heading + Math.PI / 2);
+    car.driver = 'police';
+    car.block = true;
+    car.topSpeed = 0;
+    world.cars.push(car);
+    world.policeCars.push(car);
+    world.roadblock.cars.push(car);
+  }
+  world.roadblock.active = true;
+  world.roadblock.timer = WANTED.roadblockDuration;
+  world.pendingSound = 'roadblock';
+  addMessage(world, 'Roadblock ahead!');
 }
 
 function nearestCar(world, x, z, maxDist) {
@@ -278,6 +363,7 @@ function playerShoot(world) {
   const to = hit ? hit.point : { x: p.x + dir.x * 60, y: 1.5 + dir.y * 60, z: p.z + dir.z * 60 };
   world.tracers.push({ from, to, ttl: 0.09, color: 0xffe9a0 });
   if (!hit) return;
+  spawnBurst(world.particles, world.random, hit.point.x, hit.point.y, hit.point.z, { count: 5, color: 0xffe9a0, speed: 5, life: 0.4 });
   const { kind, obj } = hit.ref;
   if (kind === 'car') return;
   obj.hp -= weapon.damage;
@@ -286,6 +372,7 @@ function playerShoot(world) {
   if (obj.hp <= 0) {
     obj.dead = true;
     obj.deadAt = world.time;
+    spawnBurst(world.particles, world.random, obj.x, 1.2, obj.z, { count: 8, color: 0xcc2222, speed: 4, life: 0.6 });
     if (kind === 'enemy') {
       world.cash += 25;
       world.mission.kills += 1;
@@ -367,7 +454,35 @@ function stepPlayerDriving(world, input, dt) {
   if (zoom) world.camDist = Math.max(6, Math.min(16, world.camDist + zoom));
   const throttle = move.y;
   const steer = -move.x;
-  stepCarPhysics(car, throttle, steer, dt, world.city.colliders);
+  const handbrake = input.sprint();
+  stepCarPhysics(car, throttle, steer, dt, world.city.colliders, { handbrake });
+  // Hard hits damage the car; a wrecked car smokes and crawls.
+  const impact = car.lastImpact ?? 0;
+  if (impact > 8) {
+    car.hp = Math.max(0, (car.hp ?? 100) - (impact - 8) * CAR.damagePerImpact);
+    spawnBurst(world.particles, world.random, car.x, 1.2, car.z, { count: 10, color: 0xffe9a0, speed: 8, life: 0.5 });
+    world.pendingSound = 'crash';
+  }
+  if ((car.hp ?? 100) <= 0) car.speed *= 0.6;
+  // Rosa's garage patches the car up for free when you park close.
+  const garageD = Math.hypot(car.x - LANDMARKS.garage.x, car.z - LANDMARKS.garage.z);
+  if (garageD < 16 && (car.hp ?? 100) < 100) {
+    car.hp = Math.min(100, car.hp + CAR.repairRate * dt);
+    if (car.hp >= 100 && !car.repairedMsg) {
+      car.repairedMsg = true;
+      addMessage(world, "Rosa's Garage — ride fully repaired.");
+    }
+  } else if ((car.hp ?? 100) < 100) {
+    car.repairedMsg = false;
+  }
+  // Handbrake drift kicks up dust at the rear wheels.
+  if (handbrake && Math.abs(car.speed) > 10) {
+    spawnBurst(world.particles, world.random, car.x - Math.cos(car.heading) * 2, 0.4, car.z - Math.sin(car.heading) * 2, { count: 2, color: 0x8a7a66, speed: 2, up: 1, life: 0.7, gravity: 2 });
+  }
+  // A smoking wreck leaves a trail.
+  if ((car.hp ?? 100) < 40 && world.random() < 0.3) {
+    spawnBurst(world.particles, world.random, car.x, 1.6, car.z, { count: 1, color: 0x555555, speed: 1, up: 3, life: 1.2, gravity: -1 });
+  }
   // The camera, HUD and save all read the player: while driving, the player IS the car.
   const p = world.player;
   p.x = car.x;
@@ -447,11 +562,25 @@ export function stepWorld(world, input, dt, audio) {
   // Per-frame derived state the HUD and the renderer read.
   world.__objective = objectiveOf(world);
   world.nearCar = world.playerCar ? null : nearestCar(world, p.x, p.z, 4.5);
+  // Side-activity markers: F near the stadium starts a street race, F near the market
+  // starts a courier gig — only while no story mission is running.
+  world.nearActivity = null;
+  if (!world.mission.active) {
+    const raceStart = raceStartPoint();
+    const courierStart = courierStartPoint();
+    if (world.activities.race.state === 'idle'
+      && Math.hypot(p.x - raceStart.x, p.z - raceStart.z) < 8) {
+      world.nearActivity = 'race';
+    } else if (world.activities.courier.state === 'idle'
+      && Math.hypot(p.x - courierStart.x, p.z - courierStart.z) < 8) {
+      world.nearActivity = 'courier';
+    }
+  }
 
   // Mission delay after a completion: the next one starts on its own.
   if (world.missionDelay > 0) {
     world.missionDelay -= dt;
-    if (world.missionDelay <= 0 && world.missionIndex < 6) {
+    if (world.missionDelay <= 0 && world.missionIndex < MISSION_COUNT) {
       startMission(world.mission, world.missionIndex, missionFacade(world));
     }
   }
@@ -461,7 +590,17 @@ export function stepWorld(world, input, dt, audio) {
     if (world.playerCar) exitCar(world);
     else enterCar(world);
   }
-  if (actions & ACTION_INTERACT && !world.playerCar) playerMelee(world);
+  if (actions & ACTION_INTERACT) {
+    if (world.nearActivity === 'race' && world.playerCar) {
+      startStreetRace(world);
+    } else if (world.nearActivity === 'race') {
+      addMessage(world, 'You need a car for the street race.');
+    } else if (world.nearActivity === 'courier') {
+      startCourier(world);
+    } else if (!world.playerCar) {
+      playerMelee(world);
+    }
+  }
   if (actions & ACTION_RELOAD && !world.playerCar) {
     const weapon = WEAPONS[p.weapon];
     if (p.ammo < weapon.mag) p.reloading = weapon.reload;
@@ -514,23 +653,51 @@ export function stepWorld(world, input, dt, audio) {
     ? Math.min(...world.policeCars.map((c) => Math.hypot(c.x - p.x, c.z - p.z)))
     : Infinity;
   stepWanted(world.wanted, dt, nearestCop);
+  // Roadblocks at three stars and up: two units park across the road ahead.
+  const rb = world.roadblock;
+  rb.cooldown -= dt;
+  if (world.wanted.level >= WANTED.roadblockAt && !rb.active && rb.cooldown <= 0) {
+    spawnRoadblock(world);
+  }
+  if (rb.active) {
+    rb.timer -= dt;
+    if (world.wanted.level < WANTED.roadblockAt || rb.timer <= 0) {
+      for (const car of rb.cars) {
+        const i = world.cars.indexOf(car);
+        if (i >= 0) world.cars.splice(i, 1);
+        const j = world.policeCars.indexOf(car);
+        if (j >= 0) world.policeCars.splice(j, 1);
+      }
+      rb.cars = [];
+      rb.active = false;
+      rb.cooldown = WANTED.roadblockCooldown;
+    }
+  }
+  // Patrol cars only (roadblock units hold their ground and are not counted here).
   const wantCars = wantedCarCount(world.wanted.level);
-  while (world.policeCars.length < wantCars) {
+  const patrol = () => world.policeCars.filter((c) => !c.block);
+  while (patrol().length < wantCars) {
     const car = spawnPoliceCar(world.city, world.random, p);
     world.policeCars.push(car);
     world.cars.push(car);
   }
-  while (world.policeCars.length > wantCars) {
-    const car = world.policeCars.pop();
+  while (patrol().length > wantCars) {
+    const cars = patrol();
+    const car = cars[cars.length - 1];
     const i = world.cars.indexOf(car);
     if (i >= 0) world.cars.splice(i, 1);
+    const j = world.policeCars.indexOf(car);
+    if (j >= 0) world.policeCars.splice(j, 1);
   }
-  for (const car of world.policeCars) stepPoliceCar(car, dt, world.city, p, world.playerCar);
+  for (const car of world.policeCars) {
+    car.topSpeed = CAR.policeSpeed + (world.wanted.level - 1) * WANTED.policeSpeedPerStar;
+    stepPoliceCar(car, dt, world.city, p, world.playerCar);
+  }
   if (world.wanted.level >= 2 && world.cops.length < world.wanted.level) {
     world.cops.push(spawnFootCop(world.city, world.random, p));
   }
   for (const cop of world.cops) {
-    const result = stepFootCop(cop, dt, p, world.playerCar !== null, world.time, world.random);
+    const result = stepFootCop(cop, dt, p, world.playerCar !== null, world.time, world.random, world.wanted.level);
     if (result === 'bust') {
       world.endState = 'busted';
       return 'busted';
@@ -589,12 +756,15 @@ export function stepWorld(world, input, dt, audio) {
     if (!world.playerCar && Math.hypot(c.x - p.x, c.z - p.z) < 2.2) {
       c.taken = true;
       world.cash += 100;
+      spawnBurst(world.particles, world.random, c.x, 1.4, c.z, { count: 8, color: 0xf2c230, speed: 3, up: 5, life: 0.8 });
       addMessage(world, 'Hidden package found: +$100.');
       world.pendingSound = 'pickup';
     }
   }
 
   stepTaxi(world, dt);
+  stepActivities(world, dt);
+  stepParticles(world.particles, dt);
 
   // Missions.
   if (world.mission.active) {
@@ -606,21 +776,22 @@ export function stepWorld(world, input, dt, audio) {
       const done = world.mission.index;
       world.completed.push(done);
       world.missionIndex = done + 1;
-      const reward = [300, 500, 800, 1200, 1500, 2500][done];
-      const repGain = [10, 15, 20, 25, 30, 50][done];
-      world.cash += reward;
-      world.rep += repGain;
-      world.lastReward = reward;
-      if (done === 3) {
+      const reward = MISSIONS[done].reward;
+      world.cash += reward.cash;
+      world.rep += reward.rep;
+      world.lastReward = reward.cash;
+      if (reward.unlockSmg) {
         world.hasSmg = true;
         world.player.weapon = 'smg';
         world.player.ammo = WEAPONS.smg.mag;
       }
+      cleanupMissionCars(world);
       saveGame(world);
-      if (world.missionIndex < 6) world.missionDelay = 3;
-      else addMessage(world, 'Story complete — you are the King of the Bay.');
+      if (world.missionIndex < MISSION_COUNT) world.missionDelay = 3;
+      else addMessage(world, 'Story complete — Solmar Bay is yours.');
     } else if (result === 'fail') {
       // A failed escape restarts the same mission.
+      cleanupMissionCars(world);
       startMission(world.mission, world.mission.index, missionFacade(world));
     }
   }
@@ -652,7 +823,28 @@ export function afterDeath(world) {
 
 /** The current objective for the HUD and the minimap, or null. */
 export function objectiveOf(world) {
-  if (world.mission.active) return currentObjective(world.mission);
+  if (world.mission.active) {
+    const step = MISSIONS[world.mission.index]?.steps[world.mission.step];
+    if (step) {
+      if (step.type === 'tail' && world.markCar) {
+        return { text: step.text, at: { x: world.markCar.x, z: world.markCar.z }, mission: MISSIONS[world.mission.index].title };
+      }
+      if (step.type === 'escort' && world.escortCar) {
+        return { text: step.text, at: { x: world.escortCar.x, z: world.escortCar.z }, mission: MISSIONS[world.mission.index].title };
+      }
+    }
+    return currentObjective(world.mission);
+  }
+  if (world.activities.race.state === 'running') {
+    const race = world.activities.race;
+    const point = race.points[race.idx];
+    return { text: `Street race — checkpoint ${race.idx + 1}/${race.points.length}`, at: point, mission: 'Street race' };
+  }
+  if (world.activities.courier.state === 'running') {
+    const courier = world.activities.courier;
+    const drop = courier.drops[courier.idx];
+    return { text: `Courier — drop ${courier.idx + 1}/${courier.drops.length}`, at: drop, mission: 'Courier gig' };
+  }
   if (world.taxi.state === 'riding') return { text: `Take the fare to the marker ($${world.taxi.fare})`, at: world.taxi.dest, mission: 'Taxi fare' };
   if (world.taxi.state === 'waiting') return { text: 'A fare is waiting for a ride', at: { x: world.taxi.passenger.x, z: world.taxi.passenger.z }, mission: 'Taxi fare' };
   return null;

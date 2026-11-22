@@ -31,7 +31,14 @@ export const CAR = {
   trafficSpeed: 13,
   policeSpeed: 36,
   steer: 2.1,
+  /** NPC route-followers (escort, mark car) turn this much tighter than the player:
+   * a sharp corner must not throw them off the road into a block. */
+  npcSteerMul: 2,
   drag: 0.5,
+  handbrakeSteer: 1.7,
+  handbrakeDrag: 1.6,
+  damagePerImpact: 0.9,
+  repairRate: 12,
   radius: 2.3,
   length: 4.6,
   width: 2.0,
@@ -49,11 +56,44 @@ export const WANTED = {
   copCarPerStar: 1,
   bustedCashLoss: 0.1,
   bustedMinLoss: 50,
+  roadblockAt: 3,
+  roadblockCooldown: 20,
+  roadblockDuration: 30,
+  policeSpeedPerStar: 1.5,
 };
 
 export const TRAFFIC_COUNT = 14;
 export const PED_COUNT = 24;
-export const COLLECTIBLES = 12;
+export const COLLECTIBLES = 20;
+
+/** Street race: five checkpoints around the city, against the clock. */
+export const RACE = {
+  points: [
+    { x: -112, z: -168 }, // Solmar Stadium
+    { x: 168, z: -168 }, // north-east corner
+    { x: 224, z: 56 }, // east road
+    { x: 0, z: 168 }, // south road
+    { x: -168, z: 0 }, // west road
+  ],
+  timeLimit: 120,
+  checkpointRadius: 12,
+  reward: 400,
+  timeBonusPerSecond: 2,
+  repReward: 5,
+};
+
+/** Courier gig: three drops, against the clock. */
+export const COURIER = {
+  drops: 3,
+  timeLimit: 150,
+  dropRadius: 8,
+  payPerDrop: 100,
+  bonus: 100,
+  repPerDrop: 1,
+};
+
+/** Day/night: one full day every DAY_LENGTH seconds of game time. */
+export const DAY_LENGTH = 240;
 
 export const PALETTE = {
   sky: 0x8ec9e8,
@@ -89,6 +129,9 @@ export const LANDMARKS = {
   policeStation: { x: 140, z: 196, label: 'Solmar PD' },
   boardwalk: { x: 238, z: 0, label: 'Boardwalk' },
   plaza: { x: 0, z: 0, label: 'Plaza del Sol' },
+  stadium: { x: -112, z: -196, label: 'Solmar Stadium' },
+  marina: { x: 268, z: -140, label: 'Solmar Marina' },
+  market: { x: 84, z: 84, label: 'Mercado del Sol' },
 };
 
 /** Deterministic screenshot staging: ?shot=<name>&seed=1 (see shots.json). */

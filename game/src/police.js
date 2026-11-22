@@ -53,6 +53,12 @@ export function spawnPoliceCar(city, random, player) {
 
 /** One police-car step: chase the player's position and ram their car. */
 export function stepPoliceCar(car, dt, city, player, playerCar) {
+  if (car.block) {
+    // A roadblock unit holds its ground, lights flashing.
+    stepCarPhysics(car, -1, 0, dt, city.colliders);
+    car.flash += dt;
+    return;
+  }
   const target = playerCar || player;
   const steer = steerToward(car, target.x, target.z);
   const dist = Math.hypot(target.x - car.x, target.z - car.z);
@@ -78,7 +84,7 @@ export function spawnFootCop(city, random, player) {
  * One foot-cop step: run at the player, shoot from mid range, and grab them up close.
  * Returns 'bust' when the cop reaches the player on foot, 'shoot' when it fires.
  */
-export function stepFootCop(cop, dt, player, playerInCar, time, random) {
+export function stepFootCop(cop, dt, player, playerInCar, time, random, level = 1) {
   const dx = player.x - cop.x;
   const dz = player.z - cop.z;
   const dist = Math.hypot(dx, dz);
@@ -88,7 +94,9 @@ export function stepFootCop(cop, dt, player, playerInCar, time, random) {
   while (diff > Math.PI) diff -= Math.PI * 2;
   while (diff < -Math.PI) diff += Math.PI * 2;
   cop.heading += Math.max(-4 * dt, Math.min(4 * dt, diff));
-  const targetSpeed = dist > 26 ? 0 : 5.2;
+  // Pursue out to 60 m — the old 26 m cutoff made foot cops give up the moment the
+  // player broke away, so a chase on foot never actually closed in.
+  const targetSpeed = dist > 60 ? 0 : 5.2;
   cop.speed += (targetSpeed - cop.speed) * Math.min(1, 5 * dt);
   cop.x += Math.cos(cop.heading) * cop.speed * dt;
   cop.z += Math.sin(cop.heading) * cop.speed * dt;
@@ -96,7 +104,7 @@ export function stepFootCop(cop, dt, player, playerInCar, time, random) {
   cop.lastShot = (cop.lastShot ?? 0) + dt;
   if (!playerInCar && dist > 7 && dist < 30 && cop.lastShot > 1.1) {
     cop.lastShot = 0;
-    if (random() < 0.55) return 'shoot';
+    if (random() < 0.45 + level * 0.04) return 'shoot';
   }
   return null;
 }
