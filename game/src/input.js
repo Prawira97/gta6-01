@@ -1,43 +1,54 @@
-// Solmar Bay — input. One object with the exact shape the world ticks on:
-// move(), sprint(), takeLook(), takeZoom(), attackHeld(), takeActions().
-// Keyboard (WASD + arrows, Shift to sprint / handbrake, E to act, Space to
-// shoot), mouse look while the pointer is locked, wheel to zoom. takeLook /
-// takeZoom / takeActions are consumptive: each call returns what accumulated
-// since the last call, then clears it, so a frame never double-applies.
-export function createInput() {
+// Solmar Bay — browser input: WASD/arrows to move, Shift to sprint (or
+// handbrake-drift in a car), mouse to look, left click / Space to shoot,
+// E to interact, wheel to zoom. takeLook / takeZoom / takeActions consume
+// their deltas, so each step reads each event once.
+export const ACTION_INTERACT = 1;
+
+export function createInput(canvas) {
   const keys = new Set();
-  let actions = 0;
   let lookX = 0;
   let lookY = 0;
   let zoom = 0;
+  let actions = 0;
   let mouseDown = false;
+  let spaceDown = false;
 
-  function onKeyDown(e) {
-    if (e.repeat) return;
+  const onKeyDown = (e) => {
+    if (e.code === 'KeyE' && !keys.has('KeyE')) actions |= ACTION_INTERACT;
     keys.add(e.code);
-    if (e.code === 'KeyE') actions += 1;
-    if (['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Space'].includes(e.code)) {
+    // Arrows and Space would scroll or trigger browser shortcuts; the
+    // game owns them while it runs.
+    if (e.code === 'Space' || e.code.startsWith('Arrow')) {
       e.preventDefault();
     }
-  }
-  function onKeyUp(e) {
-    keys.delete(e.code);
-  }
-  function onMouseMove(e) {
-    if (document.pointerLockElement) {
-      lookX += e.movementX;
-      lookY += e.movementY;
+    if (e.code === 'Space') {
+      spaceDown = true;
     }
-  }
-  function onMouseDown(e) {
+  };
+  const onKeyUp = (e) => {
+    keys.delete(e.code);
+    if (e.code === 'Space') spaceDown = false;
+  };
+  const onMouseMove = (e) => {
+    if (document.pointerLockElement === canvas) {
+      lookX += e.movementX || 0;
+      lookY += e.movementY || 0;
+    }
+  };
+  const onMouseDown = (e) => {
     if (e.button === 0) mouseDown = true;
-  }
-  function onMouseUp(e) {
+  };
+  const onMouseUp = (e) => {
     if (e.button === 0) mouseDown = false;
-  }
-  function onWheel(e) {
-    zoom += Math.sign(e.deltaY);
-  }
+  };
+  const onWheel = (e) => {
+    zoom += e.deltaY || 0;
+  };
+  const onBlur = () => {
+    keys.clear();
+    mouseDown = false;
+    spaceDown = false;
+  };
 
   window.addEventListener('keydown', onKeyDown);
   window.addEventListener('keyup', onKeyUp);
@@ -45,56 +56,53 @@ export function createInput() {
   window.addEventListener('mousedown', onMouseDown);
   window.addEventListener('mouseup', onMouseUp);
   window.addEventListener('wheel', onWheel, { passive: true });
+  window.addEventListener('blur', onBlur);
 
   return {
     move() {
-      const x =
-        (keys.has('KeyD') || keys.has('ArrowRight') ? 1 : 0) -
-        (keys.has('KeyA') || keys.has('ArrowLeft') ? 1 : 0);
-      const y =
-        (keys.has('KeyW') || keys.has('ArrowUp') ? 1 : 0) -
-        (keys.has('KeyS') || keys.has('ArrowDown') ? 1 : 0);
+      let x = 0;
+      let y = 0;
+      if (keys.has('KeyW') || keys.has('ArrowUp')) y += 1;
+      if (keys.has('KeyS') || keys.has('ArrowDown')) y -= 1;
+      if (keys.has('KeyD') || keys.has('ArrowRight')) x += 1;
+      if (keys.has('KeyA') || keys.has('ArrowLeft')) x -= 1;
+      const len = Math.hypot(x, y);
+      if (len > 1) {
+        x /= len;
+        y /= len;
+      }
       return { x, y };
     },
     sprint() {
       return keys.has('ShiftLeft') || keys.has('ShiftRight');
     },
     takeLook() {
-      const r = { x: lookX, y: lookY };
+      const out = { x: lookX, y: lookY };
       lookX = 0;
       lookY = 0;
-      return r;
+      return out;
     },
     takeZoom() {
-      const z = zoom;
+      const out = zoom;
       zoom = 0;
-      return z;
+      return out;
     },
     attackHeld() {
-      return keys.has('Space') || mouseDown;
-    },
-    isDown(code) {
-      return keys.has(code);
+      return mouseDown || spaceDown;
     },
     takeActions() {
-      const a = actions;
+      const out = actions;
       actions = 0;
-      return a;
+      return out;
     },
-    // Click the canvas to lock the pointer for mouse look.
-    attach(canvas) {
-      if (!canvas) return;
-      canvas.addEventListener('click', () => {
-        if (canvas.requestPointerLock) canvas.requestPointerLock();
-      });
-    },
-    detach() {
+    dispose() {
       window.removeEventListener('keydown', onKeyDown);
       window.removeEventListener('keyup', onKeyUp);
       window.removeEventListener('mousemove', onMouseMove);
       window.removeEventListener('mousedown', onMouseDown);
       window.removeEventListener('mouseup', onMouseUp);
       window.removeEventListener('wheel', onWheel);
+      window.removeEventListener('blur', onBlur);
     },
   };
 }

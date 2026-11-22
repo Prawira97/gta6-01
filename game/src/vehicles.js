@@ -1,102 +1,127 @@
-// Solmar Bay — vehicles: arcade car physics, NPC traffic and the Manhattan
-// grid router the escort truck (and the tail mark) follow so they never cut
-// across a building block. One angle convention everywhere: heading 0 faces
-// +x (east), PI/2 faces -z (north); forward is (cos h, -sin h).
-import { CAR, GRID, ROADS } from './config.js';
-import { dirX, dirZ } from './random.js';
-import { snapToRoad } from './city.js';
+// Solmar Bay — cars: parked rides along the streets, traffic that loops
+// the grid, and the player's driving: throttle, steering, handbrake drift,
+// crash damage with smoke, and repair at Rosa's Garage.
+import { CAR, WORLD, LOCATIONS } from './config.js';
+import { gridPath, nearestStreet } from './city.js';
+import { followPath } from './people.js';
+import { smoke } from './effects.js';
 
-export function makeCar(rng, opts = {}) {
+const CAR_COLORS = [0xc03030, 0x3060c0, 0xe0c020, 0x30a060, 0xd8d8d8, 0x303030, 0xc06030, 0x8040a0];
+const KINDS = ['sedan', 'sedan', 'sedan', 'coupe', 'taxi'];
+
+export function makeCar(world, x, z, kind, driver) {
   return {
-    x: opts.x ?? 0,
-    z: opts.z ?? 0,
-    heading: opts.heading ?? 0,
+    x, z,
+    heading: 0,
     speed: 0,
-    kind: opts.kind || 'sedan',
-    color: opts.color ?? rng.pick([0xf2c200, 0xd23c2e, 0x2e6fd2, 0x3aa655, 0xe8e8e8, 0x222226]),
-    driver: opts.driver ?? null,
+    slide: 0,
+    kind,
+    driver: driver || null,
+    color: kind === 'taxi' ? 0xe0c020 : world.rng.pick(CAR_COLORS),
     damage: 0,
-    block: false,
+    route: null,
+    routeIndex: 0,
+    retarget: 0,
   };
 }
 
-// The player car: accelerate / brake / reverse, steer (scaled by speed so a
-// parked car cannot spin), and handbrake drift on sprint — sharper turn,
-// speed bleeds off, smoke if the car is already hurt.
-export function updatePlayerCar(car, input, dt) {
-  const mv = input.move();
-  const sprint = input.sprint();
-  if (mv.y > 0) car.speed += CAR.accel * dt;
-  else if (mv.y < 0) car.speed -= (car.speed > 0.5 ? CAR.brake : CAR.accel * 0.6) * dt;
-  else car.speed -= Math.sign(car.speed) * Math.min(Math.abs(car.speed), 6 * dt);
-  if (sprint) car.speed -= Math.sign(car.speed) * Math.min(Math.abs(car.speed), 10 * dt);
-  car.speed = Math.max(-CAR.reverseSpeed, Math.min(CAR.maxSpeed, car.speed));
-  const steer = mv.x;
-  const grip = sprint ? 1.9 : 1;
-  const turn = steer * Math.max(-1, Math.min(1, car.speed / 10)) * CAR.steer * grip * dt;
-  car.heading += turn;
-  car.x += dirX(car.heading) * car.speed * dt;
-  car.z += dirZ(car.heading) * car.speed * dt;
-  car.x = Math.max(GRID.min, Math.min(GRID.max, car.x));
-  car.z = Math.max(GRID.min, Math.min(GRID.max, car.z));
+export function createCars(world) {
+  const rng = world.rng;
+  const cars = [];
+  // Parked rides, facing along the street they sit on.
+  for (let i = 0; i < 8; i += 1) {
+    const alongX = rng.chance(0.5);
+    const street = rng.pick(WORLD.STREETS);
+    const along = rng.float(-224, 224);
+    const car = makeCar(world, alongX ? along : street, alongX ? street : along, KINDS[i % KINDS.length], null);
+    car.heading = alongX ? 0 : Math.PI / 2;
+    // Park at the street edge so the road stays clear.
+    if (alongX) car.z += 6;
+    else car.x += 6;
+    cars.push(car);
+  }
+  // Traffic, looping the grid.
+  for (let i = 0; i < 6; i += 1) {
+    const street = rng.pick(WORLD.STREETS);
+    const along = rng.float(-224, 224);
+    const car = makeCar(world, street, along, KINDS[(i + 2) % KINDS.length], 'traffic');
+    car.speed = rng.float(6, 10);
+    car.route = gridPath({ x: car.x, z: car.z }, { x: nearestStreet(rng.float(-224, 224)), z: nearestStreet(rng.float(-224, 224)) });
+    car.routeIndex = 0;
+    cars.push(car);
+  }
+  return cars;
 }
 
-// NPC traffic: axis-aligned, one road at a time, turning at intersections.
-// The RNG comes from the world, so traffic is identical for a given seed.
-export function updateNpcCar(car, dt, rng) {
-  const nearX = ROADS.some((r) => Math.abs(car.x - r) < 2);
-  const nearZ = ROADS.some((r) => Math.abs(car.z - r) < 2);
-  if (nearX && nearZ && rng.chance(dt * 0.35)) {
-    car.heading += rng.chance(0.5) ? Math.PI / 2 : -Math.PI / 2;
+// Drive the player's car with the input: W/S throttle, A/D steer, Shift
+// handbrake (sharper turn, the tail slides). Returns the new speed.
+export function driveCar(world, car, input, dt) {
+  const move = input.move();
+  const handbrake = input.sprint();
+  const maxSpeed = car.damage >= 100
+    ? CAR.wreckMax
+    : CAR.maxSpeed * (1 - car.damage / 200);
+  if (move.y > 0) {
+    car.speed += CAR.accel * dt * move.y;
+  } else if (move.y < 0) {
+    car.speed -= CAR.brake * dt;
+  } else {
+    car.speed -= Math.sign(car.speed) * Math.min(Math.abs(car.speed), 6 * dt);
   }
-  car.speed = CAR.npcSpeed;
-  car.x += dirX(car.heading) * car.speed * dt;
-  car.z += dirZ(car.heading) * car.speed * dt;
-  if (car.x < GRID.min + 4 || car.x > GRID.max - 4 || car.z < GRID.min + 4 || car.z > GRID.max - 4) {
-    car.heading += Math.PI;
-    car.x = Math.max(GRID.min + 4, Math.min(GRID.max - 4, car.x));
-    car.z = Math.max(GRID.min + 4, Math.min(GRID.max - 4, car.z));
+  car.speed = Math.max(-CAR.reverse, Math.min(maxSpeed, car.speed));
+  const turnRate = CAR.turn * (handbrake ? 1.9 : 1) * Math.min(1, Math.abs(car.speed) / 10);
+  car.heading += move.x * turnRate * dt * Math.sign(car.speed || 1);
+  // Drift: the tail slides out under handbrake, then grips back.
+  const targetSlide = handbrake && Math.abs(car.speed) > 5 ? move.x * car.speed * 0.35 : 0;
+  car.slide += (targetSlide - car.slide) * Math.min(1, (handbrake ? 6 : 3) * dt);
+  const fx = Math.cos(car.heading);
+  const fz = Math.sin(car.heading);
+  const rx = -Math.sin(car.heading);
+  const rz = Math.cos(car.heading);
+  car.x += (fx * car.speed + rx * car.slide) * dt;
+  car.z += (fz * car.speed + rz * car.slide) * dt;
+  // Wrecked cars smoke.
+  if (car.damage > 60 && world.rng.chance(0.1)) {
+    smoke(world, car.x, car.z, 1.2);
+  }
+  return car.speed;
+}
+
+// Traffic cars follow their route; at the end, pick a new destination.
+export function updateTraffic(world, dt) {
+  for (const car of world.cars) {
+    if (car.driver !== 'traffic') continue;
+    if (!car.route || car.routeIndex >= car.route.length) {
+      car.route = gridPath(
+        { x: car.x, z: car.z },
+        { x: nearestStreet(world.rng.float(-224, 224)), z: nearestStreet(world.rng.float(-224, 224)) },
+      );
+      car.routeIndex = 0;
+    }
+    car.speed = 8;
+    followPath(car, dt);
   }
 }
 
-// Manhattan route along the road grid: snap both ends onto roads, drive the
-// L (first along the start's road, then along the destination's), then the
-// short final leg to the exact destination. Never crosses a building block.
-export function gridPath(start, dest) {
-  const s = snapToRoad(start.x, start.z);
-  const d = snapToRoad(dest.x, dest.z);
-  const pts = [{ x: s.x, z: s.z }];
-  if (s.x !== d.x) pts.push({ x: d.x, z: s.z });
-  if (s.z !== d.z) pts.push({ x: d.x, z: d.z });
-  if (d.x !== dest.x || d.z !== dest.z) pts.push({ x: dest.x, z: dest.z });
-  return pts;
+// A hard hit on a building: damage, a speed cut and a thud.
+export function crashCar(world, car) {
+  if (Math.abs(car.speed) < CAR.damageSpeed) return;
+  car.damage = Math.min(120, car.damage + CAR.damagePerHit);
+  car.speed *= 0.3;
+  if (world.sound) world.sound('crash');
+  if (world.message && car.driver === 'player') {
+    world.message(car.damage >= 100 ? 'Wrecked! Get it to Rosa\u2019s Garage.' : 'Crash!');
+  }
 }
 
-// Follow a grid route: steer toward the current node, advance on arrival.
-// The escort truck uses npcSteerMul so it holds the road instead of
-// beelining across blocks (the old bug that wedged it against a wall).
-// A finished route parks the car: speed drops to zero instead of lingering.
-export function followRoute(car, dt) {
-  if (!car.route || car.nodeIndex >= car.route.length) {
-    car.speed = 0;
-    return true;
-  }
-  const node = car.route[car.nodeIndex];
-  const dx = node.x - car.x;
-  const dz = node.z - car.z;
-  const d = Math.hypot(dx, dz);
-  if (d < 3) {
-    car.nodeIndex += 1;
-    return car.nodeIndex >= car.route.length;
-  }
-  const want = Math.atan2(-dz, dx);
-  let diff = want - car.heading;
-  while (diff > Math.PI) diff -= Math.PI * 2;
-  while (diff < -Math.PI) diff += Math.PI * 2;
-  const steer = Math.max(-1.6 * dt * CAR.npcSteerMul, Math.min(1.6 * dt * CAR.npcSteerMul, diff));
-  car.heading += steer;
-  car.speed = CAR.npcSpeed;
-  car.x += dirX(car.heading) * car.speed * dt;
-  car.z += dirZ(car.heading) * car.speed * dt;
-  return false;
+// Repair at Rosa's Garage: free, instant, only when parked close.
+export function tryRepair(world) {
+  const car = world.playerCar;
+  if (!car || car.damage <= 0) return false;
+  const d = Math.hypot(car.x - LOCATIONS.garage.x, car.z - LOCATIONS.garage.z);
+  if (d > 12) return false;
+  car.damage = 0;
+  if (world.message) world.message('Repaired at Rosa\u2019s Garage.');
+  if (world.sound) world.sound('repair');
+  return true;
 }

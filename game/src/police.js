@@ -1,120 +1,157 @@
-// Solmar Bay — the police: patrol cars, foot cops and roadblocks. Wanted
-// 1 brings patrol cars (capped at 4), wanted 2 adds foot cops (capped at 4,
-// they give up past 60 m), wanted 3+ sets a two-car roadblock across the
-// road ahead of the player. Everything here is deterministic: spawns use
-// the world's seeded RNG and the counts are capped, never random.
-import { WANTED, GRID, ROADS } from './config.js';
-import { dist } from './random.js';
-import { snapToRoad, nearestRoad } from './city.js';
+// Solmar Bay — the police: foot cops who chase to 60 m and bust on
+// contact, patrol cars (capped at 4) that chase along the streets, and a
+// two-car roadblock that appears at wanted 3+. Heat cools one star every
+// 25 seconds without a fresh crime.
+import { POLICE } from './config.js';
+import { gridPath, nearestStreet } from './city.js';
+import { followPath } from './people.js';
 
-function spawnPatrolCar(world) {
-  const p = world.player;
-  // Appear on a road a little ahead of the player, facing them.
-  const at = snapToRoad(p.x + 60, p.z);
+export function setWanted(world, level) {
+  world.wanted.level = Math.max(0, Math.min(5, level));
+  world.wanted.timer = 0;
+  if (world.wanted.level === 0) {
+    clearRoadblock(world);
+  }
+}
+
+function clearRoadblock(world) {
+  if (!world.roadblock.active) return;
+  world.policeCars = world.policeCars.filter((c) => !c.block);
+  world.roadblock.active = false;
+  world.roadblock.cars = [];
+}
+
+function spawnPatrol(world) {
+  const rng = world.rng;
+  const angle = rng ? rng.float(0, Math.PI * 2) : 0;
+  const x = world.player.x + Math.cos(angle) * 60;
+  const z = world.player.z + Math.sin(angle) * 60;
   const car = {
-    x: at.x,
-    z: at.z,
-    heading: Math.atan2(-(p.z - at.z), p.x - at.x),
+    x: nearestStreet(x),
+    z: nearestStreet(z),
+    heading: 0,
     speed: 0,
     kind: 'police',
-    color: 0x1c3fd6,
     driver: 'police',
+    color: 0x223344,
     damage: 0,
     block: false,
+    route: null,
+    routeIndex: 0,
+    retarget: 0,
   };
   world.policeCars.push(car);
   return car;
 }
 
+function spawnRoadblock(world) {
+  const px = nearestStreet(world.player.x + 30);
+  const pz = nearestStreet(world.player.z);
+  const mk = (x, z) => ({
+    x, z, heading: Math.PI, speed: 0,
+    kind: 'police', driver: 'police', color: 0x223344,
+    damage: 0, block: true, route: null, routeIndex: 0, retarget: 0,
+  });
+  const a = mk(px, pz);
+  const b = mk(px, pz + 9);
+  // Face the oncoming player: a roadblock is a wall across the road, not
+  // a pair of cars driving along it.
+  a.heading = Math.PI;
+  b.heading = Math.PI;
+  world.policeCars.push(a, b);
+  world.roadblock.active = true;
+  world.roadblock.cars = [a, b];
+  if (world.message) world.message('Roadblock ahead!');
+  if (world.sound) world.sound('siren');
+}
+
 function spawnFootCop(world) {
-  const p = world.player;
-  const at = snapToRoad(p.x + 25, p.z + 10);
-  const cop = { x: at.x, z: at.z, heading: 0, speed: 5, hp: 100 };
+  const rng = world.rng;
+  const angle = rng ? rng.float(0, Math.PI * 2) : 0;
+  const cop = {
+    x: world.player.x + Math.cos(angle) * 18,
+    z: world.player.z + Math.sin(angle) * 18,
+    heading: 0,
+    speed: POLICE.footSpeed,
+    kind: 'cop',
+    route: null,
+    routeIndex: 0,
+    retarget: 0,
+  };
   world.cops.push(cop);
   return cop;
 }
 
 export function updatePolice(world, dt) {
-  const wanted = world.wanted.level;
+  const wanted = world.wanted;
 
-  // Patrol cars: up to 4 while wanted, and they melt away once the heat dies.
-  if (wanted >= WANTED.patrolAt && world.policeCars.length < WANTED.maxPatrol) {
-    spawnPatrolCar(world);
-  } else if (wanted === 0 && world.policeCars.length > 0) {
-    world.policeCars.pop();
+  // Heat cools: one star per quiet stretch.
+  if (wanted.level > 0) {
+    wanted.timer += dt;
+    if (wanted.timer >= POLICE.decaySeconds) {
+      wanted.timer = 0;
+      setWanted(world, wanted.level - 1);
+    }
   }
 
-  // Foot cops: up to 4 from wanted 2; they chase only inside 60 m.
-  if (wanted >= WANTED.footCopsAt && world.cops.length < WANTED.maxFootCops) {
+  // Patrol cars: up to min(wanted, 4), one at a time.
+  const patrolTarget = Math.min(wanted.level, POLICE.patrolCap);
+  const patrol = world.policeCars.filter((c) => !c.block);
+  world.spawnTimer = (world.spawnTimer || 0) - dt;
+  if (patrol.length < patrolTarget && world.spawnTimer <= 0) {
+    world.spawnTimer = 0.5;
+    spawnPatrol(world);
+  }
+  if (patrol.length > patrolTarget) {
+    // Wanted fell: retire the extra patrol cars.
+    const extra = patrol.slice(patrolTarget);
+    world.policeCars = world.policeCars.filter((c) => !extra.includes(c));
+  }
+
+  // Roadblock at wanted 3+.
+  if (wanted.level >= POLICE.roadblockAt && !world.roadblock.active) {
+    spawnRoadblock(world);
+  } else if (wanted.level < POLICE.roadblockAt && world.roadblock.active) {
+    clearRoadblock(world);
+  }
+
+  // Foot cops: up to 3 while wanted.
+  const copTarget = wanted.level > 0 ? 3 : 0;
+  if (world.cops.length < copTarget && world.spawnTimer <= 0) {
     spawnFootCop(world);
-  } else if (wanted === 0 && world.cops.length > 0) {
-    world.cops.pop();
+  }
+  if (world.cops.length > copTarget) {
+    world.cops.length = copTarget;
   }
 
-  // Roadblock: two cars across the road ahead of the player at wanted 3+.
-  if (wanted >= WANTED.roadblockAt) {
-    if (!world.roadblock.active) {
-      const p = world.player;
-      const ahead = 46;
-      const fx = Math.cos(world.camYaw || 0);
-      const fz = -Math.sin(world.camYaw || 0);
-      const cx = p.x + fx * ahead;
-      const cz = p.z + fz * ahead;
-      const road = nearestRoad(cx);
-      const perp = Math.abs(fx) > Math.abs(fz) ? 'z' : 'x';
-      const cars = [];
-      for (const off of [-7, 7]) {
-        cars.push({
-          x: perp === 'z' ? road : cx + off,
-          z: perp === 'z' ? cz + off : road,
-          heading: 0,
-          speed: 0,
-          kind: 'police',
-          color: 0x1c3fd6,
-          driver: 'police',
-          damage: 0,
-          block: true,
-        });
-      }
-      world.roadblock.active = true;
-      world.roadblock.cars = cars;
-    }
-  } else if (world.roadblock.active) {
-    world.roadblock.active = false;
-    world.roadblock.cars = [];
-  }
-
-  // Patrol cars steer straight at the player; a bump slows both down.
+  // Patrol cars chase the player along the streets.
   for (const car of world.policeCars) {
-    const dx = world.player.x - car.x;
-    const dz = world.player.z - car.z;
-    const d = Math.hypot(dx, dz) || 1;
-    const want = Math.atan2(-dz, dx);
-    let diff = want - car.heading;
-    while (diff > Math.PI) diff -= Math.PI * 2;
-    while (diff < -Math.PI) diff += Math.PI * 2;
-    car.heading += Math.max(-1.6 * dt, Math.min(1.6 * dt, diff));
-    car.speed = Math.min(13, car.speed + 8 * dt);
-    car.x += Math.cos(car.heading) * car.speed * dt;
-    car.z += -Math.sin(car.heading) * car.speed * dt;
-    if (d < 3 && world.playerCar) {
-      world.playerCar.damage = Math.min(100, (world.playerCar.damage || 0) + 2);
-      car.speed *= 0.5;
+    if (car.block) continue;
+    car.retarget -= dt;
+    if (!car.route || car.routeIndex >= car.route.length || car.retarget <= 0) {
+      car.route = gridPath({ x: car.x, z: car.z }, { x: world.player.x, z: world.player.z });
+      car.routeIndex = 0;
+      car.retarget = 3;
     }
+    car.speed = POLICE.patrolSpeed;
+    followPath(car, dt);
   }
 
-  // Foot cops run at the player inside 60 m; caught on foot means busted.
+  // Foot cops chase to 60 m; closer than 2.2 m, the player is busted.
   for (const cop of world.cops) {
-    const d = dist(cop.x, cop.z, world.player.x, world.player.z);
-    if (d < 60) {
-      const dx = world.player.x - cop.x;
-      const dz = world.player.z - cop.z;
-      const len = Math.hypot(dx, dz) || 1;
-      cop.x += (dx / len) * cop.speed * dt;
-      cop.z += (dz / len) * cop.speed * dt;
-      if (d < 2 && !world.playerCar) {
-        world.endState = 'busted';
-      }
+    const dx = world.player.x - cop.x;
+    const dz = world.player.z - cop.z;
+    const d = Math.hypot(dx, dz);
+    if (d > POLICE.footPursue) continue;
+    cop.retarget -= dt;
+    if (!cop.route || cop.routeIndex >= cop.route.length || cop.retarget <= 0) {
+      cop.route = gridPath({ x: cop.x, z: cop.z }, { x: world.player.x, z: world.player.z });
+      cop.routeIndex = 0;
+      cop.retarget = 1.5;
+    }
+    followPath(cop, dt);
+    if (d < POLICE.bustDistance) {
+      world.endState = 'busted';
     }
   }
 }

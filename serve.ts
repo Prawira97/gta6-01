@@ -1,58 +1,58 @@
-// Solmar Bay — a tiny static file server for local play and the E2E tests.
-// Serves this repository's root (so / loads game/index.html and /game/*,
-// /screenshots/* resolve beside it), with the right MIME types for ES
-// modules, and prints one line when it starts listening — the E2E waits for
-// that line. Node's standard library only; run it as `node serve.ts` (the
-// --port flag picks the port, default 8080).
+// Solmar Bay — a tiny static server for local play and tests. Serves the
+// repo root; any path not found there falls back to game/, because the
+// page is served at / and its relative references resolve to the root.
+// Usage: node serve.ts [--port 8081]
 import { createServer } from 'node:http';
 import { readFileSync, existsSync, statSync } from 'node:fs';
-import { join, extname } from 'node:path';
+import { join, extname, normalize, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-const root = fileURLToPath(new URL('.', import.meta.url));
+const root = dirname(fileURLToPath(import.meta.url));
 const args = process.argv.slice(2);
-let port = 8080;
-for (let i = 0; i < args.length; i += 1) {
-  if (args[i] === '--port' && args[i + 1]) port = Number(args[i + 1]);
-}
+const portIdx = args.indexOf('--port');
+const port = portIdx >= 0 ? Number(args[portIdx + 1] || 8080) : 8080;
 
 const MIME = {
   '.html': 'text/html; charset=utf-8',
   '.js': 'text/javascript; charset=utf-8',
   '.mjs': 'text/javascript; charset=utf-8',
+  '.css': 'text/css; charset=utf-8',
   '.json': 'application/json; charset=utf-8',
   '.jpg': 'image/jpeg',
   '.jpeg': 'image/jpeg',
   '.png': 'image/png',
-  '.css': 'text/css; charset=utf-8',
+  '.svg': 'image/svg+xml',
+  '.ts': 'text/plain; charset=utf-8',
 };
 
+function resolve(path) {
+  const clean = normalize(decodeURIComponent(path)).replace(/^\/+/, '');
+  const atRoot = join(root, clean);
+  if (atRoot.startsWith(root) && existsSync(atRoot) && statSync(atRoot).isFile()) return atRoot;
+  const inGame = join(root, 'game', clean);
+  if (inGame.startsWith(join(root, 'game')) && existsSync(inGame) && statSync(inGame).isFile()) return inGame;
+  return null;
+}
+
 const server = createServer((req, res) => {
-  const url = new URL(req.url ?? '/', 'http://127.0.0.1');
-  const rel = url.pathname === '/' ? '/game/index.html' : url.pathname;
-  // The page is game/index.html served at /, so its relative references
-  // (./src/main.js, ./vendor/three/...) resolve against the root. Look a
-  // path up under the repo first, then under game/ — the game must also work
-  // standalone when game/ itself is the server root.
-  let file = join(root, decodeURIComponent(rel));
-  if (!file.startsWith(root) || !existsSync(file) || statSync(file).isDirectory()) {
-    file = join(root, 'game', decodeURIComponent(rel));
-  }
-  if (!file.startsWith(root) || !existsSync(file) || statSync(file).isDirectory()) {
-    res.writeHead(404, { 'content-type': 'text/plain' });
-    res.end('not found');
-    return;
-  }
-  const headers = { 'content-type': MIME[extname(file)] ?? 'application/octet-stream' };
-  if (req.method === 'HEAD') {
-    res.writeHead(200, headers);
+  const url = new URL(req.url || '/', 'http://127.0.0.1');
+  let path = url.pathname;
+  if (path === '/favicon.ico') {
+    res.writeHead(204);
     res.end();
     return;
   }
-  res.writeHead(200, headers);
+  if (path === '/') path = '/index.html';
+  const file = resolve(path) || (path.endsWith('/') ? resolve(`${path}index.html`) : null);
+  if (!file) {
+    res.writeHead(404, { 'content-type': 'text/plain' });
+    res.end('not found\n');
+    return;
+  }
+  res.writeHead(200, { 'content-type': MIME[extname(file)] || 'application/octet-stream' });
   res.end(readFileSync(file));
 });
 
 server.listen(port, '127.0.0.1', () => {
-  console.log(`Solmar Bay serving on http://127.0.0.1:${port}/`);
+  console.log(`Solmar Bay serving at http://127.0.0.1:${port}/`);
 });

@@ -3,77 +3,91 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Solmar Bay — open-world crime game</title>
+<meta name="description" content="Solmar Bay — an open-world crime game that plays offline in a desktop browser.">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' fill='%23ffd23a'/%3E%3Ctext x='16' y='23' font-size='20' text-anchor='middle'%3ES%3C/text%3E%3C/svg%3E">
+<title>Solmar Bay — Open-World Crime Game</title>
 <style>
-  html, body { margin: 0; padding: 0; height: 100%; overflow: hidden; background: #0a1420;
-    font-family: system-ui, -apple-system, "Segoe UI", sans-serif; color: #f2f2f2; }
-  #game-canvas { position: fixed; inset: 0; width: 100%; height: 100%; display: block; }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { width: 100%; height: 100%; overflow: hidden; background: #0a1428; font-family: "Segoe UI", Arial, sans-serif; }
+  #game-canvas { display: block; width: 100%; height: 100%; }
   .hidden { display: none !important; }
-  #hud { position: fixed; inset: 0; pointer-events: none; z-index: 5; }
-  #top-left { position: absolute; top: 12px; left: 12px; font-size: 15px; line-height: 1.5;
-    text-shadow: 0 1px 3px #000; }
-  #cash { font-size: 26px; font-weight: 700; color: #7dd87d; }
-  #objective { font-size: 15px; color: #ffe9a8; max-width: 420px; }
-  #top-right { position: absolute; top: 12px; right: 12px; text-align: right;
-    font-size: 15px; line-height: 1.5; text-shadow: 0 1px 3px #000; }
-  #wanted { color: #ffd34d; font-size: 18px; letter-spacing: 2px; }
-  #bottom-left { position: absolute; bottom: 12px; left: 12px; font-size: 14px;
-    line-height: 1.6; text-shadow: 0 1px 3px #000; }
-  #speed { font-size: 22px; font-weight: 700; }
-  #hp-bar { width: 160px; height: 10px; background: #333; border: 1px solid #666; }
-  #hp { height: 100%; width: 100%; background: #3aa655; }
-  #minimap { position: absolute; bottom: 12px; right: 12px; width: 160px; height: 160px;
-    border: 2px solid rgba(255,255,255,0.5); background: #0e1a24; }
-  #message { position: absolute; bottom: 190px; left: 50%; transform: translateX(-50%);
-    font-size: 17px; color: #ffe9a8; text-shadow: 0 1px 3px #000; }
-  #title-screen { position: fixed; inset: 0; z-index: 10; display: flex; flex-direction: column;
-    align-items: center; justify-content: center; gap: 14px;
-    background: linear-gradient(180deg, rgba(10,20,32,0.55), rgba(10,20,32,0.85)); }
-  #title-screen h1 { font-size: 64px; margin: 0; letter-spacing: 6px; color: #ffd34d;
-    text-shadow: 0 3px 12px #000; }
-  #title-screen p { margin: 0; font-size: 17px; color: #dfe8f2; text-shadow: 0 1px 3px #000; }
-  #start-button { pointer-events: auto; font-size: 22px; padding: 12px 34px; cursor: pointer;
-    background: #ffd34d; color: #1a1a1a; border: none; border-radius: 6px; font-weight: 700; }
-  #start-button:hover { background: #ffdf7a; }
-  #controls { font-size: 14px; color: #b8c4d0; text-align: center; line-height: 1.7; }
+  #hud { position: fixed; inset: 0; pointer-events: none; color: #fff; text-shadow: 0 1px 3px rgba(0,0,0,.8); z-index: 5; }
+  .hud-box { position: absolute; background: rgba(0,0,0,.45); border: 1px solid rgba(255,255,255,.18); border-radius: 8px; padding: 8px 12px; }
+  #hud-tl { top: 12px; left: 12px; }
+  #hud-tr { top: 12px; right: 12px; text-align: right; }
+  #hud-bl { bottom: 12px; left: 12px; max-width: 520px; }
+  #hud-br { bottom: 12px; right: 12px; }
+  #clock { font-size: 20px; font-weight: 700; }
+  #cash { font-size: 22px; font-weight: 700; color: #7dd87d; }
+  #rep, #mission, #pkg { font-size: 14px; opacity: .95; }
+  #wanted { font-size: 20px; color: #ffd23a; letter-spacing: 2px; }
+  #objective { font-size: 15px; font-weight: 600; }
+  #speed { font-size: 20px; font-weight: 700; }
+  #message { position: absolute; top: 72px; left: 50%; transform: translateX(-50%); background: rgba(0,0,0,.55); border: 1px solid rgba(255,255,255,.2); border-radius: 8px; padding: 8px 18px; font-size: 16px; font-weight: 600; white-space: nowrap; }
+  .overlay { position: fixed; inset: 0; z-index: 10; display: flex; flex-direction: column; align-items: center; justify-content: center; background: linear-gradient(160deg, rgba(10,20,40,.88), rgba(60,20,40,.82)); color: #fff; text-align: center; }
+  .overlay h1 { font-size: 64px; letter-spacing: 6px; color: #ffd23a; text-shadow: 0 4px 24px rgba(0,0,0,.7); }
+  .overlay h2 { font-size: 22px; font-weight: 400; opacity: .9; margin: 8px 0 24px; }
+  .overlay p { max-width: 560px; font-size: 15px; line-height: 1.6; opacity: .85; margin-bottom: 24px; }
+  .overlay .keys { font-size: 13px; opacity: .75; margin-bottom: 24px; line-height: 1.8; }
+  .overlay button { pointer-events: auto; font-size: 20px; font-weight: 700; padding: 14px 42px; margin: 6px; border: none; border-radius: 8px; background: #ffd23a; color: #1a1a1a; cursor: pointer; }
+  .overlay button:hover { background: #ffe06a; }
+  .overlay button.secondary { background: rgba(255,255,255,.16); color: #fff; border: 1px solid rgba(255,255,255,.4); }
+  #end-title { font-size: 72px; color: #ff4444; }
 </style>
 <script type="importmap">
-{ "imports": { "three": "./vendor/three/three.module.min.js" } }
+{
+  "imports": {
+    "three": "./vendor/three/three.module.min.js"
+  }
+}
 </script>
 </head>
 <body>
 <canvas id="game-canvas"></canvas>
+
 <div id="hud">
-  <div id="top-left">
-    <div id="cash">$200</div>
-    <div id="objective">Meet Mara at the plaza — 1/12</div>
-    <div id="mission-progress">0/12</div>
+  <div class="hud-box" id="hud-tl">
+    <div id="clock">08:00</div>
+    <div id="cash">$0</div>
+    <div id="rep">REP 0</div>
+  </div>
+  <div class="hud-box" id="hud-tr">
+    <div id="wanted">☆☆☆☆☆</div>
+    <div id="mission">1/12</div>
     <div id="pkg">PKG 0/20</div>
   </div>
-  <div id="top-right">
-    <div id="wanted">☆☆☆☆☆</div>
-    <div id="clock">08:00</div>
-    <div id="race-timer"></div>
-    <div id="courier-timer"></div>
+  <div class="hud-box" id="hud-bl">
+    <div id="objective">Meet Mara at the plaza</div>
   </div>
-  <div id="bottom-left">
-    <div id="speed">0 km/h</div>
-    <div id="hp-bar"><div id="hp"></div></div>
-    <div id="car-damage"></div>
+  <div class="hud-box" id="hud-br">
+    <div id="speed">0 mph</div>
+    <div id="weapon">Pistol</div>
   </div>
-  <canvas id="minimap" width="160" height="160"></canvas>
-  <div id="message"></div>
+  <div id="message" class="hidden"></div>
 </div>
-<div id="title-screen">
+
+<div id="title-screen" class="overlay">
   <h1>SOLMAR BAY</h1>
-  <p>A sun-soaked open-world crime game — twelve missions, one city, no way out but up.</p>
-  <button id="start-button">Start Game</button>
-  <div id="controls">
-    WASD / arrows — move &amp; drive &nbsp;·&nbsp; Shift — sprint / handbrake<br>
-    E — enter car / start race &amp; courier &nbsp;·&nbsp; Space / click — shoot<br>
-    Mouse — look (click the game to lock) &nbsp;·&nbsp; Wheel — zoom &nbsp;·&nbsp; M — mute
+  <h2>An open-world crime game — offline, in your browser</h2>
+  <p>Kai Reyes is home after five years. Mara and Rosa have work for him:
+  twelve story missions, street races at the stadium, courier gigs from the
+  market, and twenty hidden packages across a 9&times;9 coastal city. Watch
+  the wanted stars — the Solmar Bay police do not forget.</p>
+  <div class="keys">
+    WASD / arrows — move &amp; drive &nbsp;·&nbsp; Shift — sprint / handbrake drift<br>
+    Mouse — look &nbsp;·&nbsp; Click / Space — shoot &nbsp;·&nbsp; E — enter car / interact<br>
+    Wheel — zoom &nbsp;·&nbsp; Missions, races and courier gigs pay cash and rep
   </div>
+  <button id="start-button">Start Game</button>
+  <button id="continue-button" class="secondary hidden">Continue</button>
 </div>
+
+<div id="end-screen" class="overlay hidden">
+  <h1 id="end-title">BUSTED</h1>
+  <h2>Solmar Bay keeps turning without you.</h2>
+  <button id="respawn-button">Back on the street</button>
+</div>
+
 <script type="module" src="./src/main.js"></script>
 </body>
 </html>

@@ -1,62 +1,84 @@
-// Solmar Bay — pedestrians. They walk the sidewalks, turn at intersections
-// and get knocked down (then get back up) when a car clips them. Their count
-// never changes, so a deterministic run always sees the same crowd.
-import { GRID, ROADS } from './config.js';
-import { dist } from './random.js';
+// Solmar Bay — people: pedestrians walking the streets, and the shared
+// route follower the escort truck, the tail mark and the peds all use.
+// A route is a list of street waypoints (gridPath); an entity follows it
+// at its speed and stops at the last point.
+import { WORLD } from './config.js';
+import { gridPath, nearestStreet } from './city.js';
 
-export const PED_COUNT = 24;
+const PED_COLORS = [0xd8a0a0, 0xa0c8d8, 0xc8d8a0, 0xd8c890, 0xb0a0d8, 0x90d8b0, 0xd890a0, 0x88a8c8];
 
-export function spawnPeds(world) {
+// Move `entity` along entity.route (waypoints, entity.routeIndex) at
+// entity.speed. Returns true when it arrives at the last waypoint.
+export function followPath(entity, dt) {
+  const route = entity.route;
+  if (!route || route.length === 0) return true;
+  const target = route[entity.routeIndex];
+  if (!target) return true;
+  const dx = target.x - entity.x;
+  const dz = target.z - entity.z;
+  const d = Math.hypot(dx, dz);
+  const step = entity.speed * dt;
+  if (d <= Math.max(step, 0.5)) {
+    entity.x = target.x;
+    entity.z = target.z;
+    entity.routeIndex += 1;
+    if (entity.routeIndex >= route.length) return true;
+    return false;
+  }
+  entity.x += (dx / d) * step;
+  entity.z += (dz / d) * step;
+  entity.heading = Math.atan2(dz, dx);
+  return false;
+}
+
+export function createPeds(world, count) {
+  const rng = world.rng;
   const peds = [];
-  for (let i = 0; i < PED_COUNT; i += 1) {
-    const road = world.rng.pick(ROADS);
-    const along = world.rng.range(GRID.min + 10, GRID.max - 10);
-    const vertical = world.rng.chance(0.5);
-    peds.push({
-      x: vertical ? road + 4 : along,
-      z: vertical ? along : road + 4,
-      heading: world.rng.pick([0, Math.PI / 2, Math.PI, -Math.PI / 2]),
-      speed: world.rng.range(1, 1.8),
-      state: 'walk',
-      downTimer: 0,
-    });
+  for (let i = 0; i < count; i += 1) {
+    const onXStreet = rng.chance(0.5);
+    const street = rng.pick(WORLD.STREETS);
+    const along = rng.float(-224, 224);
+    const ped = {
+      x: onXStreet ? street : along,
+      z: onXStreet ? along : street,
+      heading: rng.float(0, Math.PI * 2),
+      speed: rng.float(0.9, 1.6),
+      color: rng.pick(PED_COLORS),
+      kind: 'ped',
+      route: null,
+      routeIndex: 0,
+    };
+    pickPedDestination(world, ped);
+    peds.push(ped);
   }
   return peds;
 }
 
+function pickPedDestination(world, ped) {
+  const rng = world.rng;
+  // A destination worth walking to: not the ped's own corner, or it would
+  // stand still re-picking all day.
+  let dest = null;
+  for (let tries = 0; tries < 5; tries += 1) {
+    const cand = {
+      x: nearestStreet(rng.float(-224, 224)),
+      z: nearestStreet(rng.float(-224, 224)),
+    };
+    if (Math.hypot(cand.x - ped.x, cand.z - ped.z) > 30) {
+      dest = cand;
+      break;
+    }
+    dest = cand;
+  }
+  ped.route = gridPath({ x: ped.x, z: ped.z }, dest);
+  ped.routeIndex = 0;
+}
+
 export function updatePeds(world, dt) {
   for (const ped of world.peds) {
-    if (ped.state === 'down') {
-      ped.downTimer -= dt;
-      if (ped.downTimer <= 0) ped.state = 'walk';
-      continue;
+    if (!ped.route || ped.routeIndex >= ped.route.length) {
+      pickPedDestination(world, ped);
     }
-    // Walk forward; at an intersection, sometimes turn onto the cross road.
-    const nearX = ROADS.some((r) => Math.abs(ped.x - r) < 2);
-    const nearZ = ROADS.some((r) => Math.abs(ped.z - r) < 2);
-    if (nearX && nearZ && world.rng.chance(dt * 0.4)) {
-      ped.heading += world.rng.chance(0.5) ? Math.PI / 2 : -Math.PI / 2;
-    }
-    ped.x += Math.cos(ped.heading) * ped.speed * dt;
-    ped.z += -Math.sin(ped.heading) * ped.speed * dt;
-    // Turn around at the city edge instead of leaving town.
-    if (ped.x < GRID.min || ped.x > GRID.max || ped.z < GRID.min || ped.z > GRID.max) {
-      ped.heading += Math.PI;
-      ped.x = Math.max(GRID.min, Math.min(GRID.max, ped.x));
-      ped.z = Math.max(GRID.min, Math.min(GRID.max, ped.z));
-    }
-  }
-
-  // A player-driven car clipping a pedestrian knocks them down and draws
-  // heat. The crowd itself never shrinks, so the sim's counts stay stable.
-  for (const car of world.cars) {
-    if (car.driver !== 'player' || Math.abs(car.speed) < 2) continue;
-    for (const ped of world.peds) {
-      if (ped.state === 'walk' && dist(car.x, car.z, ped.x, ped.z) < 2) {
-        ped.state = 'down';
-        ped.downTimer = 2;
-        world.setWanted(world.wanted.level + 1);
-      }
-    }
+    followPath(ped, dt);
   }
 }

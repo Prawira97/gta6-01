@@ -1,80 +1,114 @@
-// Solmar Bay — tuning constants. One place for every magic number the
-// gameplay systems share, so a balance change never needs a hunt through
-// the modules. All distances are metres, all speeds m/s, all money dollars.
-export const GRID = { min: -224, max: 224, spacing: 56 };
-export const ROADS = [-224, -168, -112, -56, 0, 56, 112, 168, 224];
+// Solmar Bay — shared tuning constants. One place for every number the
+// world, the missions and the activities agree on, so the sim and the
+// browser build the same game.
 
-export const PLAYER = {
-  walkSpeed: 6,
-  sprintSpeed: 9.5,
-  hp: 100,
-  radius: 1,
-  enterCarRadius: 4,
+export const WORLD = {
+  // Streets run at multiples of BLOCK, nine per axis, from -224 to 224.
+  BLOCK: 56,
+  STREETS: [-224, -168, -112, -56, 0, 56, 112, 168, 224],
+  // The playable city spans +-BOUND metres; water lies beyond the east edge.
+  BOUND: 252,
+  // Day starts at 08:00.
+  DAY_START: 8,
 };
 
-export const CAR = {
-  accel: 14,
-  brake: 30,
-  maxSpeed: 38,
-  reverseSpeed: 10,
-  steer: 1.9,
-  // NPC traffic speed, and the extra steering multiplier the escort truck
-  // needs to stay on the road grid instead of cutting corners.
-  npcSpeed: 9,
-  npcSteerMul: 2,
-};
+// The game clock runs TIME_SCALE x real time: one real second is a game minute.
+export const TIME_SCALE = 60;
 
-export const WANTED = {
-  max: 5,
-  decayPerSec: 0.05,
-  roadblockAt: 3,
-  footCopsAt: 2,
-  patrolAt: 1,
-  maxPatrol: 4,
-  maxFootCops: 4,
-};
-
-export const COMBAT = {
-  pistolDamage: 34,
-  pistolRate: 0.25,
-  smgDamage: 20,
-  smgRate: 0.1,
-  range: 45,
-  // cos of the half-angle of the aim cone: a shot only counts as a hit when
-  // the target is nearly straight ahead of the camera.
-  aimCos: 0.985,
-};
-
-export const REWARDS = {
-  race: 500,
-  courier: 300,
-  package: 25,
-  kill: 50,
-};
-
-export const RACE = { checkpoints: 5, timeLimit: 120, start: { x: -112, z: -168 } };
-export const COURIER = { drops: 3 };
-
-// Interaction radii, in metres. One source of truth: the missions, the
-// activities and the world all reach for these instead of hard-coding them.
-export const INTERACT = { reach: 5, driveTo: 7, race: 8, pickup: 2 };
-
-// Named places. The mission script, the activities and the sim all agree on
-// these coordinates, so a place never drifts between systems.
-export const PLACES = {
+// Named places. Every mission target, activity start and landmark lives on
+// a street or an open square, never inside a building, so it is reachable.
+export const LOCATIONS = {
   plaza: { x: 0, z: 0 },
   casino: { x: 28, z: -196 },
   docks: { x: 196, z: 196 },
   stadium: { x: -112, z: -168 },
-  market: { x: -56, z: 112 },
-  garage: { x: 56, z: 56 },
-  vault: { x: 168, z: -112 },
-  marina: { x: 210, z: 0 },
-  hospital: { x: -168, z: 56 },
+  market: { x: -168, z: 56 },
+  garage: { x: -28, z: 112 },
+  vault: { x: 168, z: -168 },
+  marina: { x: 252, z: 0 },
+  raceStart: { x: -112, z: -168 },
 };
 
-export const COLORS = {
-  building: [0x8a7f70, 0x7a6f62, 0x9a8a76, 0x6f7a8a, 0x8a6f6f, 0x757a6a],
-  car: [0xf2c200, 0xd23c2e, 0x2e6fd2, 0x3aa655, 0xe8e8e8, 0x222226, 0x7a4fd2],
-  police: 0x1c3fd6,
+export const PLAYER = {
+  walk: 6,
+  sprint: 10,
+  hp: 100,
+  radius: 0.6,
+  // How close the player must be to enter a car or pick something up.
+  interact: 3.5,
+};
+
+export const CAR = {
+  accel: 14,
+  brake: 22,
+  maxSpeed: 34,
+  reverse: 10,
+  turn: 2.4,
+  // A hit harder than this damages the car.
+  damageSpeed: 15,
+  damagePerHit: 25,
+  // A wrecked car crawls until the garage repairs it.
+  wreckMax: 3,
+};
+
+export const COMBAT = {
+  pistol: { damage: 34, rate: 0.25, range: 42 },
+  smg: { damage: 22, rate: 0.09, range: 38 },
+  // Half-angle of the firing cone, in radians.
+  aimCone: 0.45,
+};
+
+export const POLICE = {
+  // Foot cops pursue the player out to this distance.
+  footPursue: 60,
+  footSpeed: 4.2,
+  // A foot cop this close busts the player.
+  bustDistance: 2.2,
+  // Patrol cars: at most this many non-roadblock cars.
+  patrolCap: 4,
+  patrolSpeed: 16,
+  // Roadblocks appear at this wanted level.
+  roadblockAt: 3,
+  // Wanted decays one level per this many seconds out of sight.
+  decaySeconds: 25,
+};
+
+export const RACE = {
+  // Five checkpoints, a loop around the stadium quarter.
+  points: [
+    { x: -112, z: -168 },
+    { x: -168, z: -112 },
+    { x: -168, z: 56 },
+    { x: -112, z: 112 },
+    { x: -56, z: -112 },
+  ],
+  // Seconds to finish the loop.
+  limit: 120,
+  reward: 600,
+  checkpointRadius: 10,
+};
+
+export const COURIER = {
+  drops: [
+    { x: -112, z: 168 },
+    { x: 56, z: 224 },
+    { x: 168, z: 112 },
+  ],
+  reward: 150,
+  dropRadius: 4,
+};
+
+export const COLLECTIBLE = {
+  count: 20,
+  reward: 25,
+  radius: 3,
+};
+
+export const MISSION = {
+  // Radius for goto / talk / pickup / deliver / driveTo / escape steps.
+  radius: 6,
+  // Radius for race checkpoints inside missions.
+  raceRadius: 8,
+  // Tail: lose the mark past this distance.
+  tailLoseDistance: 55,
 };

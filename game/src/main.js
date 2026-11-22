@@ -1,96 +1,103 @@
-// Solmar Bay — browser entry. Builds the world, wires input / HUD / audio /
-// renderer, and runs the game loop. With ?shot=<name> it stages a fixed
-// scene, renders a fixed number of frames and sets window.__shotReady — the
-// page then sits still so the screenshot is byte-identical every run.
-import * as THREE from 'three';
+// Solmar Bay — the browser entry point: builds the world, stages a shot
+// (?shot=1..4) or starts the title screen, and runs the frame loop.
 import { createWorld, stepWorld } from './world.js';
 import { createRenderer } from './render.js';
 import { createInput } from './input.js';
-import { createAudio } from './audio.js';
 import { updateHud } from './hud.js';
 import { stageShot } from './shots.js';
-
-void THREE;
+import { makeAudio } from './audio.js';
+import { loadGame, saveGame } from './save.js';
 
 const params = new URLSearchParams(window.location.search);
-const shotName = params.get('shot');
+const shotNum = Number(params.get('shot') || 0);
 const canvas = document.getElementById('game-canvas');
-const world = createWorld({ seed: shotName ? 7 : 1, shot: !!shotName });
-const renderer = createRenderer(world, canvas);
-const input = createInput();
-input.attach(canvas);
-const audio = createAudio();
-world.audio = (name) => audio.play(name);
+const world = createWorld({ seed: 1, shot: shotNum >= 1 && shotNum <= 4 });
+const renderer = createRenderer(canvas, world);
+const audio = makeAudio();
+world.sound = (name) => audio.sound(name);
 
-const titleScreen = document.getElementById('title-screen');
-const startButton = document.getElementById('start-button');
-let started = false;
-let respawnTimer = 0;
-
-function beginGame() {
-  started = true;
-  if (titleScreen) titleScreen.classList.add('hidden');
+function applySave() {
+  const data = loadGame();
+  if (!data) return false;
+  world.cash = data.cash || 0;
+  world.rep = data.rep || 0;
+  world.missionIndex = data.missionIndex || 0;
+  world.hasSmg = !!data.hasSmg;
+  world.activities.race.best = data.raceBest ?? null;
+  world.courierDone = data.courierDone || 0;
+  world.time = data.time || 8;
+  const n = Math.min(data.packages || 0, world.collectibles.length);
+  for (let i = 0; i < n; i += 1) world.collectibles[i].taken = true;
+  return true;
 }
-if (startButton) startButton.addEventListener('click', beginGame);
-// M toggles the procedural audio off and on.
-window.addEventListener('keydown', (e) => {
-  if (e.code === 'KeyM' && !e.repeat) audio.setMuted(!audio.muted);
-});
 
-updateHud(world);
-
-if (shotName) {
-  // Shot mode: no animation loop. Stage, step a fixed number of frames,
-  // render, and stop — the page is frozen for the screenshot.
-  const staged = stageShot(world, shotName);
-  if (staged.started) beginGame();
-  const idle = {
-    move: () => ({ x: 0, y: 0 }),
-    sprint: () => false,
-    takeLook: () => ({ x: 0, y: 0 }),
-    takeZoom: () => 0,
-    attackHeld: () => false,
-    takeActions: () => 0,
-  };
-  const frames = shotName === 'start' ? 2 : 5;
-  for (let i = 0; i < frames; i += 1) {
-    if (staged.started) stepWorld(world, idle, 1 / 60, null);
+if (shotNum >= 1 && shotNum <= 4) {
+  // Shot mode: stage the scene, hide the menu, render a few frames and
+  // signal readiness. The world is never stepped, so the frame is fixed.
+  stageShot(world, shotNum);
+  document.getElementById('title-screen').classList.add('hidden');
+  updateHud(world, document);
+  let frames = 0;
+  const shotFrame = () => {
     renderer.render();
-    updateHud(world);
-  }
-  window.__shotReady = true;
+    frames += 1;
+    if (frames < 3) requestAnimationFrame(shotFrame);
+    else window.__shotReady = true;
+  };
+  requestAnimationFrame(shotFrame);
 } else {
-  // Normal play: fixed-step accumulator, HUD + audio every frame.
+  const hasSave = applySave();
+  const input = createInput(canvas);
+  const titleScreen = document.getElementById('title-screen');
+  const startButton = document.getElementById('start-button');
+  const continueButton = document.getElementById('continue-button');
+  const endScreen = document.getElementById('end-screen');
+  const endTitle = document.getElementById('end-title');
+  const respawnButton = document.getElementById('respawn-button');
+  if (continueButton) {
+    continueButton.classList.toggle('hidden', !hasSave);
+  }
+
+  let playing = false;
   let last = performance.now();
-  let acc = 0;
+
+  function startGame() {
+    audio.resume();
+    titleScreen.classList.add('hidden');
+    playing = true;
+    if (canvas.requestPointerLock) canvas.requestPointerLock();
+    world.message('Welcome back to Solmar Bay.');
+  }
+
+  startButton.addEventListener('click', startGame);
+  if (continueButton) continueButton.addEventListener('click', startGame);
+  canvas.addEventListener('click', () => {
+    if (playing && canvas.requestPointerLock) canvas.requestPointerLock();
+  });
+  respawnButton.addEventListener('click', () => {
+    world.respawn(world.endState);
+    endScreen.classList.add('hidden');
+  });
+  window.addEventListener('resize', () => renderer.resize());
+  // Keep progress if the tab closes mid-run; mission completion saves too.
+  window.addEventListener('beforeunload', () => {
+    if (playing) saveGame(world);
+  });
+
   function frame(now) {
-    requestAnimationFrame(frame);
-    const dt = Math.min(0.05, (now - last) / 1000);
+    const dt = Math.min(0.05, Math.max(0.001, (now - last) / 1000));
     last = now;
-    if (started) {
-      acc += dt;
-      let n = 0;
-      while (acc >= 1 / 60 && n < 3) {
-        stepWorld(world, input, 1 / 60, null);
-        acc -= 1 / 60;
-        n += 1;
-      }
-      if (world.endState) {
-        respawnTimer += dt;
-        if (respawnTimer > 1.5) {
-          world.respawn(world.endState);
-          respawnTimer = 0;
-        }
-      }
-      const speed = world.playerCar ? Math.abs(world.playerCar.speed) : 0;
-      audio.engine(speed);
+    if (playing && !world.endState) {
+      stepWorld(world, input, dt, audio);
+    }
+    if (world.endState && endScreen.classList.contains('hidden')) {
+      endTitle.textContent = world.endState === 'busted' ? 'BUSTED' : 'WASTED';
+      endScreen.classList.remove('hidden');
     }
     renderer.render();
-    updateHud(world);
+    updateHud(world, document);
+    requestAnimationFrame(frame);
   }
+  updateHud(world, document);
   requestAnimationFrame(frame);
 }
-
-window.addEventListener('resize', () => {
-  renderer.resize(window.innerWidth, window.innerHeight);
-});
