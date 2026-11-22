@@ -1,58 +1,69 @@
-// Save and load: one JSON blob in localStorage with cash, reputation, mission progress,
-// collectibles and the player's last position. A corrupt or absent save starts a new game.
-import { SAVE_KEY } from './config.js';
+// Solmar Bay — saves. Version 2 of the save format, stored in localStorage.
+// A version 1 save (same fields, older key) is accepted and migrated, so a
+// player coming back from v1 keeps their cash, rep, missions and best time.
+// Everything is guarded: no localStorage (Node, private mode) just means no
+// saving, never a crash.
+const KEY_V2 = 'solmar-bay-save-v2';
+const KEY_V1 = 'solmar-bay-save';
+
+function storage() {
+  try {
+    if (typeof window !== 'undefined' && window.localStorage) return window.localStorage;
+  } catch {
+    return null;
+  }
+  return null;
+}
 
 export function loadSave() {
+  const store = storage();
+  if (!store) return null;
+  const raw = store.getItem(KEY_V2) || store.getItem(KEY_V1);
+  if (!raw) return null;
   try {
-    const raw = window.localStorage.getItem(SAVE_KEY);
-    if (!raw) return null;
     const data = JSON.parse(raw);
-    if (!data || typeof data.cash !== 'number' || typeof data.missionIndex !== 'number') return null;
-    // Versioned saves: v1 had no version field; anything else is from the future.
-    if (data.version !== undefined && data.version !== 2) return null;
-    return data;
+    if (!data || typeof data !== 'object') return null;
+    return {
+      version: data.version ?? 1,
+      cash: typeof data.cash === 'number' ? data.cash : 200,
+      rep: typeof data.rep === 'number' ? data.rep : 0,
+      missionIndex: typeof data.missionIndex === 'number' ? data.missionIndex : 0,
+      hasSmg: !!data.hasSmg,
+      // v1 stored the best race time under `best`; v2 calls it `raceBest`.
+      raceBest: typeof data.raceBest === 'number' ? data.raceBest : typeof data.best === 'number' ? data.best : null,
+      packages: typeof data.packages === 'number' ? data.packages : 0,
+    };
   } catch {
     return null;
   }
 }
 
-export function saveGame(state) {
-  // Shot staging never writes to the player's real save.
-  if (state.shotMode) return false;
+export function saveGame(world) {
+  const store = storage();
+  if (!store) return;
+  const data = {
+    version: 2,
+    cash: Math.round(world.cash),
+    rep: world.rep,
+    missionIndex: world.missionIndex,
+    hasSmg: world.hasSmg,
+    raceBest: world.activities.race.best,
+    packages: world.packagesCollected,
+  };
   try {
-    window.localStorage.setItem(SAVE_KEY, JSON.stringify({
-      version: 2,
-      cash: state.cash,
-      rep: state.rep,
-      missionIndex: state.missionIndex,
-      completed: state.completed,
-      collectibles: state.collectibles.filter((c) => c.taken)
-        .map((c) => `${Math.round(c.x)},${Math.round(c.z)}`),
-      hasSmg: state.hasSmg,
-      raceBest: state.raceBest ?? null,
-      courierDone: state.courierDone ?? 0,
-      player: { x: state.player.x, z: state.player.z },
-      time: state.time,
-    }));
-    return true;
+    store.setItem(KEY_V2, JSON.stringify(data));
   } catch {
-    return false;
+    // Storage full or blocked: the game goes on, the save is just lost.
   }
 }
 
 export function clearSave() {
+  const store = storage();
+  if (!store) return;
   try {
-    window.localStorage.removeItem(SAVE_KEY);
+    store.removeItem(KEY_V2);
+    store.removeItem(KEY_V1);
   } catch {
-    // Storage can be off: nothing to clear.
-  }
-}
-
-/** True when a save exists to continue from. */
-export function hasSave() {
-  try {
-    return window.localStorage.getItem(SAVE_KEY) !== null;
-  } catch {
-    return false;
+    // Ignore.
   }
 }

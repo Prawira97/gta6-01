@@ -1,851 +1,347 @@
-// The world: everything the game simulates, in plain numbers. The player on foot and in a
-// car, traffic, pedestrians, police, enemies, missions, taxi fares, collectibles, the wanted
-// level, cash and reputation. The renderer only paints this state; the HUD only reads it.
-import { CAR, LANDMARKS, PLAYER, STEP, WANTED, WEAPONS } from './config.js';
-import { buildCity, gridPath, nearestRoadPoint, randomIntersection, randomSidewalkPoint } from './city.js';
-import { createRandom, range } from './random.js';
-import { ACTION_CONFIRM, ACTION_ENTER, ACTION_INTERACT, ACTION_PAUSE, ACTION_RELOAD, ACTION_WEAPON } from './input.js';
-import { createCarState, collideCircle, recolorCar, separateCars, stepCarPhysics, stepTraffic } from './vehicles.js';
-import { createPedState, stepPed } from './people.js';
-import { addCrime, createWanted, spawnFootCop, spawnPoliceCar, stepFootCop, stepPoliceCar, stepWanted, wantedCarCount } from './police.js';
-import { fireShot } from './combat.js';
-import { createMissionState, currentObjective, startMission, updateMission, MISSION_COUNT, MISSIONS } from './missions.js';
-import { createActivities, courierStartPoint, raceStartPoint, startCourier, startStreetRace, stepActivities } from './activities.js';
-import { spawnBurst, stepParticles } from './effects.js';
-import { hasSave, loadSave, saveGame } from './save.js';
+// Solmar Bay — the world: state, the tick, and the wiring between systems.
+// Pure logic (no DOM, no THREE): the sim runs this file in Node, the browser
+// renders it. Everything random flows through the world's seeded RNG, so the
+// same seed + the same inputs always produce the same world.
+import { PLAYER, CAR, WANTED, REWARDS, PLACES, GRID, INTERACT } from './config.js';
+import { makeRng, dist, clamp, dirX, dirZ } from './random.js';
+import { buildCity } from './city.js';
+import { MISSIONS, createMissionState, resetMissionState, startMission, updateMission, currentObjective } from './missions.js';
+import { updateActivities, startStreetRace, startCourier } from './activities.js';
+import { spawnPeds, updatePeds } from './people.js';
+import { updatePolice } from './police.js';
+import { makeCar, updatePlayerCar, updateNpcCar, gridPath, followRoute } from './vehicles.js';
+import { fireWeapon, updateEnemies } from './combat.js';
+import { updateParticles, spawnSmoke } from './effects.js';
+import { loadSave, saveGame } from './save.js';
 
-const TAU = Math.PI * 2;
-
-function angleLerp(a, b, t) {
-  let d = b - a;
-  while (d > Math.PI) d -= TAU;
-  while (d < -Math.PI) d += TAU;
-  return a + d * Math.min(1, t);
-}
-
-export function createWorld(options = {}) {
-  const seed = options.seed ?? Math.floor(Math.random() * 2 ** 31);
-  const saved = options.shot ? null : loadSave();
-  const random = createRandom(seed);
+export function createWorld(opts = {}) {
+  const seed = opts.seed ?? 1;
+  const shot = !!opts.shot;
+  const rng = makeRng(seed);
   const city = buildCity(seed);
+
   const world = {
     seed,
-    random,
+    shot,
+    rng,
     city,
-    // A loaded save resumes the day/night clock where it left off.
-    time: saved?.time ?? 0,
-    cash: saved?.cash ?? 500,
-    rep: saved?.rep ?? 0,
-    missionIndex: saved?.missionIndex ?? 0,
-    completed: saved?.completed ?? [],
-    hasSmg: saved?.hasSmg ?? false,
-    player: {
-      x: saved?.player?.x ?? LANDMARKS.home.x,
-      z: saved?.player?.z ?? LANDMARKS.home.z,
-      heading: 0,
-      speed: 0,
-      hp: PLAYER.health,
-      weapon: 'pistol',
-      ammo: WEAPONS.pistol.mag,
-      reloading: 0,
-      lastShot: -9,
-      lastDamage: -99,
-      phase: 0,
-      eyeY: 1.6,
-    },
-    camYaw: 0,
-    camPitch: 0.38,
-    camDist: 10,
-    camIdle: 0,
-    playerCar: null,
+    time: 0,
+    dayTime: 8,
+    dt: 1 / 60,
+    cash: 200,
+    rep: 0,
+    missionIndex: 0,
+    mission: createMissionState(),
+    hasSmg: false,
+    courierDone: 0,
+    packagesCollected: 0,
+    player: { x: 0, z: 20, hp: PLAYER.hp, heading: 0 },
+    wanted: { level: 0, since: 0 },
     cars: [],
     peds: [],
     cops: [],
-    enemies: [],
     policeCars: [],
-    wanted: createWanted(),
-    mission: createMissionState(),
-    targetCar: null,
-    tracers: [],
-    messages: [],
+    enemies: [],
+    particles: [],
     collectibles: [],
-    taxi: { state: 'idle', passenger: null, dest: null, timer: 0, fare: 0, cooldown: 20 },
-    endState: null,
-    missionDelay: 0,
-    kills: 0,
-    activities: createActivities(),
+    activities: {
+      race: { state: 'idle', points: [], idx: 0, t: 0, best: null },
+      courier: { state: 'idle', drops: [], idx: 0 },
+    },
+    roadblock: { active: false, cars: [] },
+    playerCar: null,
+    targetCar: null,
     markCar: null,
     escortCar: null,
-    roadblock: { active: false, cars: [], timer: 0, cooldown: 0 },
-    particles: [],
-    raceBest: saved?.raceBest ?? null,
-    courierDone: saved?.courierDone ?? 0,
+    inCar: false,
+    camYaw: 0,
+    camPitch: 0,
+    zoom: 0,
+    combatCooldown: 0,
+    endState: null,
+    messageLog: [],
+    lastMessage: '',
+    audio: null,
   };
 
-  // Shot staging never touches the player's real save.
-  world.shotMode = !!options.shot;
-
-  // A loaded save's best race time belongs to the activity that shows it.
-  world.activities.race.best = world.raceBest;
-
-  // Traffic cars on the roads.
+  // Traffic and parked cars, all on roads.
   for (let i = 0; i < 14; i += 1) {
-    const p = randomIntersection(random);
-    const kind = random() < 0.12 ? 'taxi' : (random() < 0.25 ? 'coupe' : 'sedan');
-    const car = createCarState(city, random, kind, p.x, p.z, range(random, 0, TAU));
-    car.route = [randomIntersection(random)];
+    const road = rng.pick(city.roads);
+    const along = rng.range(GRID.min + 10, GRID.max - 10);
+    const vertical = rng.chance(0.5);
+    const car = makeCar(rng, {
+      x: vertical ? road : along,
+      z: vertical ? along : road,
+      heading: rng.pick([0, Math.PI / 2, Math.PI, -Math.PI / 2]),
+      kind: rng.chance(0.15) ? 'taxi' : 'sedan',
+      driver: i < 4 ? 'npc' : null,
+    });
     world.cars.push(car);
   }
-  // Parked cars along the roads, facing along the road so they can pull straight out.
-  for (let i = 0; i < 8; i += 1) {
-    const p = randomSidewalkPoint(random);
-    const snapped = nearestRoadPoint(p.x, p.z);
-    const vertical = snapped.z === p.z; // x was snapped: the road runs along z
-    const side = random() < 0.5 ? -1 : 1;
-    const curb = 8.5;
-    const x = vertical ? snapped.x + side * curb : snapped.x;
-    const z = vertical ? snapped.z : snapped.z + side * curb;
-    const heading = vertical
-      ? (random() < 0.5 ? Math.PI / 2 : -Math.PI / 2)
-      : (random() < 0.5 ? 0 : Math.PI);
-    const car = createCarState(city, random, 'sedan', x, z, heading);
-    car.driver = null;
-    world.cars.push(car);
-  }
-  // Pedestrians on the sidewalks.
-  for (let i = 0; i < 24; i += 1) world.peds.push(createPedState(city, random));
-  // Collectibles at the city's spots.
-  for (const spot of city.collectibleSpots) {
-    world.collectibles.push({ x: spot.x, z: spot.z, taken: (saved?.collectibles ?? []).includes(`${Math.round(spot.x)},${Math.round(spot.z)}`), angle: 0 });
+
+  world.peds = spawnPeds(world);
+
+  // 20 hidden packages on sidewalks and plazas.
+  for (let i = 0; i < 20; i += 1) {
+    const road = rng.pick(city.roads);
+    const along = rng.range(GRID.min + 10, GRID.max - 10);
+    const vertical = rng.chance(0.5);
+    world.collectibles.push({
+      x: vertical ? road + 6 : along,
+      z: vertical ? along : road + 6,
+      taken: false,
+    });
   }
 
-  world.mission.index = world.missionIndex;
-  if (world.missionIndex < MISSION_COUNT) {
-    startMission(world.mission, world.missionIndex, missionFacade(world));
-  } else {
-    world.mission.active = false;
-  }
-
-  // Convenience methods the main loop and the shot stager use.
-  world.__objective = objectiveOf(world);
-  world.nearCar = null;
-  world.hasSave = () => hasSave();
-  world.startMission = (index) => startMission(world.mission, index, missionFacade(world));
-  world.setWanted = (level) => { world.wanted.level = level; world.wanted.heat = 20; };
-  world.enterCar = () => enterCar(world);
-  world.exitCar = () => exitCar(world);
-  world.spawnPoliceCar = () => {
-    const car = spawnPoliceCar(world.city, world.random, world.player);
-    world.policeCars.push(car);
+  // Methods the mission module and the sim call on the world itself.
+  world.message = (text) => {
+    world.lastMessage = text;
+    world.messageLog.push(text);
+    if (world.messageLog.length > 5) world.messageLog.shift();
+  };
+  world.sound = (name) => {
+    if (world.audio) world.audio(name);
+  };
+  world.setWanted = (n) => {
+    world.wanted.level = clamp(Math.round(n), 0, WANTED.max);
+    world.wanted.since = world.time;
+  };
+  world.respawn = (state) => {
+    world.player.x = PLACES.hospital.x;
+    world.player.z = PLACES.hospital.z;
+    world.player.hp = PLAYER.hp;
+    world.playerCar = null;
+    world.inCar = false;
+    world.wanted.level = 0;
+    world.endState = null;
+    if (state === 'busted') world.cash = Math.max(0, world.cash - 100);
+    world.message(state === 'busted' ? 'Busted! -$100 bail.' : 'Wasted! Back on your feet.');
+  };
+  world.spawnEnemies = (at, count, armed) => spawnEnemies(world, at, count, armed);
+  world.spawnMarkCar = (at) => {
+    const car = makeCar(rng, { x: at.x, z: at.z, heading: 0, kind: 'mark', color: 0x222226, driver: 'mark' });
+    car.route = null;
+    car.nodeIndex = 0;
+    world.markCar = car;
     world.cars.push(car);
     return car;
   };
-  world.damagePlayer = (amount) => damagePlayer(world, amount);
-  world.respawn = (kind) => respawn(world, kind);
-  world.save = () => saveGame(world);
+  world.spawnEscortCar = (at, dest) => {
+    const car = makeCar(rng, { x: at.x, z: at.z, heading: 0, kind: 'truck', color: 0x8a5a2e, driver: 'escort' });
+    car.route = gridPath(at, dest);
+    car.nodeIndex = 0;
+    world.escortCar = car;
+    world.cars.push(car);
+    return car;
+  };
+  world.objective = () => currentObjective(world.mission);
+
+  // A saved game resumes where it left off (never in shot mode).
+  if (!shot) {
+    try {
+      const save = loadSave();
+      if (save) {
+        world.cash = save.cash ?? world.cash;
+        world.rep = save.rep ?? 0;
+        world.missionIndex = save.missionIndex ?? 0;
+        world.hasSmg = !!save.hasSmg;
+        world.activities.race.best = save.raceBest ?? null;
+        world.packagesCollected = save.packages ?? 0;
+      }
+    } catch {
+      // A corrupt save never blocks the game; a fresh start is fine.
+    }
+  }
   return world;
 }
 
-/** The small facade the mission runner talks to. */
-function missionFacade(world) {
-  return {
-    get player() { return world.player; },
-    get inCar() { return world.playerCar !== null; },
-    get targetCar() { return world.targetCar; },
-    get playerCar() { return world.playerCar; },
-    get dt() { return STEP; },
-    get time() { return world.time; },
-    get markCar() { return world.markCar; },
-    get escortCar() { return world.escortCar; },
-    spawnEnemies: (at, count, boss) => spawnEnemies(world, at, count, boss),
-    spawnMarkCar: (at) => spawnMarkCar(world, at),
-    spawnEscortCar: (at, dest) => spawnEscortCar(world, at, dest),
-    setWanted: (n) => { world.wanted.level = n; world.wanted.heat = 20; },
-    message: (text) => addMessage(world, text),
-    sound: (name) => { world.pendingSound = name; },
-  };
-}
-
-function addMessage(world, text) {
-  world.messages.push({ text, until: world.time + 6 });
-  if (world.messages.length > 4) world.messages.shift();
-}
-
-export function spawnEnemies(world, at, count, boss) {
+export function spawnEnemies(world, at, count, armed) {
+  const made = [];
   for (let i = 0; i < count; i += 1) {
-    const angle = (i / count) * TAU + world.random() * 0.5;
-    const dist = 8 + world.random() * 14;
-    const enemy = createPedState(world.city, world.random, 'enemy');
-    enemy.x = at.x + Math.cos(angle) * dist;
-    enemy.z = at.z + Math.sin(angle) * dist;
-    enemy.hp = boss && i === 0 ? 300 : 100;
-    enemy.boss = boss && i === 0;
-    enemy.state = 'guard';
-    enemy.lastShot = 0;
+    const enemy = {
+      x: at.x + world.rng.range(-6, 6),
+      z: at.z + world.rng.range(-6, 6),
+      hp: 100,
+      armed: !!armed,
+      shootTimer: 1 + world.rng.next(),
+    };
     world.enemies.push(enemy);
+    made.push(enemy);
   }
+  return made;
 }
 
-function ensureTargetCar(world) {
-  if (world.targetCar) return;
-  const car = createCarState(world.city, world.random, 'sedan', LANDMARKS.casino.x + 24, LANDMARKS.casino.z + 8, 0);
-  recolorCar(car, 0xe8c93a);
-  car.driver = null;
-  world.cars.push(car);
-  world.targetCar = car;
-}
-
-/** The mark car for a tail step: a plain white sedan that wanders the road grid. */
-function spawnMarkCar(world, at) {
-  const car = createCarState(world.city, world.random, 'sedan', at.x + 10, at.z + 6, 0);
-  recolorCar(car, 0xe8e8e8);
-  car.driver = 'npc';
-  car.steerMul = CAR.npcSteerMul;
-  car.route = [
-    randomIntersection(world.random),
-    randomIntersection(world.random),
-    randomIntersection(world.random),
-    randomIntersection(world.random),
-  ];
-  car.nodeIndex = 0;
-  world.cars.push(car);
-  world.markCar = car;
-  return car;
-}
-
-/** The escort car: drives to `dest` and holds there until the player catches up.
- * It follows the road grid (Manhattan path) — a straight beeline would cut through
- * buildings and strand the truck, which stalled the mission. */
-function spawnEscortCar(world, at, dest) {
-  const car = createCarState(world.city, world.random, 'sedan', at.x, at.z, 0);
-  recolorCar(car, 0x4ad8a0);
-  car.driver = 'npc';
-  car.steerMul = CAR.npcSteerMul;
-  car.route = gridPath(at, dest);
-  car.nodeIndex = 0;
-  car.holdAtEnd = true;
-  world.cars.push(car);
-  world.escortCar = car;
-  return car;
-}
-
-/** Take the mission's mark/escort cars off the streets when the mission ends. */
-function cleanupMissionCars(world) {
-  for (const key of ['markCar', 'escortCar']) {
-    const car = world[key];
-    if (!car) continue;
-    const i = world.cars.indexOf(car);
-    if (i >= 0) world.cars.splice(i, 1);
-    world[key] = null;
-  }
-}
-
-/** Two police cars parked across the road ahead of the player: a roadblock. */
-function spawnRoadblock(world) {
-  const p = world.player;
-  const fx = Math.cos(p.heading);
-  const fz = Math.sin(p.heading);
-  const cx = p.x + fx * 45;
-  const cz = p.z + fz * 45;
-  for (const side of [-7, 7]) {
-    const car = createCarState(world.city, world.random, 'police', cx - fz * side, cz + fx * side, p.heading + Math.PI / 2);
-    car.driver = 'police';
-    car.block = true;
-    car.topSpeed = 0;
-    world.cars.push(car);
-    world.policeCars.push(car);
-    world.roadblock.cars.push(car);
-  }
-  world.roadblock.active = true;
-  world.roadblock.timer = WANTED.roadblockDuration;
-  world.pendingSound = 'roadblock';
-  addMessage(world, 'Roadblock ahead!');
-}
-
-function nearestCar(world, x, z, maxDist) {
-  let best = null;
-  let bestD = maxDist;
-  for (const car of world.cars) {
-    const d = Math.hypot(car.x - x, car.z - z);
-    if (d < bestD) { best = car; bestD = d; }
-  }
-  return best;
-}
-
-function damagePlayer(world, amount) {
-  const p = world.player;
-  p.hp -= amount;
-  p.lastDamage = world.time;
-  if (p.hp <= 0) {
-    p.hp = 0;
-    world.endState = 'wasted';
-  }
-}
-
-function respawn(world, kind) {
-  const loss = Math.max(WANTED.bustedMinLoss, Math.floor(world.cash * WANTED.bustedCashLoss));
-  world.cash = Math.max(0, world.cash - loss);
-  const spot = kind === 'wasted' ? LANDMARKS.hospital : LANDMARKS.policeStation;
-  world.player.x = spot.x;
-  world.player.z = spot.z;
-  world.player.hp = PLAYER.health;
-  world.playerCar = null;
-  world.wanted.level = 0;
-  world.wanted.heat = 0;
-  world.enemies = [];
-  world.cops = [];
-  for (const car of world.policeCars) {
-    const i = world.cars.indexOf(car);
-    if (i >= 0) world.cars.splice(i, 1);
-  }
-  world.policeCars = [];
-  world.endState = null;
-  addMessage(world, `${kind === 'wasted' ? 'Wasted' : 'Busted'} — lost $${loss}.`);
-  saveGame(world);
-}
-
-function enterCar(world) {
-  const p = world.player;
-  const car = nearestCar(world, p.x, p.z, 4.5);
-  if (!car) return;
-  if (car.driver === 'npc' || car.driver === 'police') {
-    // Pull the driver out: they flee on foot, and stealing a car is a crime.
-    const driver = createPedState(world.city, world.random, car.driver === 'police' ? 'cop' : 'ped');
-    driver.x = car.x + 3;
-    driver.z = car.z + 3;
-    driver.fleeUntil = world.time + 6;
-    world.peds.push(driver);
-    addCrime(world.wanted, 1);
-    addMessage(world, 'Car stolen! The cops saw that.');
-  }
-  car.driver = 'player';
-  world.playerCar = car;
-  world.pendingSound = 'click';
-}
-
-function exitCar(world) {
-  const car = world.playerCar;
-  if (!car) return;
-  car.driver = null;
-  car.speed *= 0.3;
-  world.player.x = car.x - Math.cos(car.heading) * 3.5;
-  world.player.z = car.z - Math.sin(car.heading) * 3.5;
-  world.player.heading = car.heading;
-  world.playerCar = null;
-}
-
-function playerShoot(world) {
-  const p = world.player;
-  const weapon = WEAPONS[p.weapon];
-  if (p.reloading > 0 || world.time - p.lastShot < weapon.rate) return;
-  if (p.ammo <= 0) {
-    p.reloading = weapon.reload;
+function enterOrExitCar(world) {
+  if (world.playerCar) {
+    world.playerCar.driver = null;
+    world.playerCar = null;
+    world.inCar = false;
     return;
   }
-  p.ammo -= 1;
-  p.lastShot = world.time;
-  world.pendingSound = 'shot';
-  const dir = {
-    x: Math.cos(world.camYaw) * Math.cos(world.camPitch),
-    y: -Math.sin(world.camPitch),
-    z: Math.sin(world.camYaw) * Math.cos(world.camPitch),
-  };
-  const targets = [];
-  for (const e of world.enemies) targets.push({ x: e.x, z: e.z, radius: 0.7, height: 2, ref: { kind: 'enemy', obj: e } });
-  for (const c of world.cops) targets.push({ x: c.x, z: c.z, radius: 0.7, height: 2, ref: { kind: 'cop', obj: c } });
-  for (const ped of world.peds) targets.push({ x: ped.x, z: ped.z, radius: 0.7, height: 2, ref: { kind: 'ped', obj: ped } });
+  let best = null;
+  let bestD = PLAYER.enterCarRadius;
   for (const car of world.cars) {
-    if (car === world.playerCar) continue;
-    targets.push({ x: car.x, z: car.z, radius: 2.4, height: 1.8, ref: { kind: 'car', obj: car } });
-  }
-  const hit = fireShot(p, dir, p.weapon, targets, world.random);
-  const from = { x: p.x, y: 1.5, z: p.z };
-  const to = hit ? hit.point : { x: p.x + dir.x * 60, y: 1.5 + dir.y * 60, z: p.z + dir.z * 60 };
-  world.tracers.push({ from, to, ttl: 0.09, color: 0xffe9a0 });
-  if (!hit) return;
-  spawnBurst(world.particles, world.random, hit.point.x, hit.point.y, hit.point.z, { count: 5, color: 0xffe9a0, speed: 5, life: 0.4 });
-  const { kind, obj } = hit.ref;
-  if (kind === 'car') return;
-  obj.hp -= weapon.damage;
-  if (kind === 'ped') addCrime(world.wanted, 1);
-  if (kind === 'cop') addCrime(world.wanted, 2);
-  if (obj.hp <= 0) {
-    obj.dead = true;
-    obj.deadAt = world.time;
-    spawnBurst(world.particles, world.random, obj.x, 1.2, obj.z, { count: 8, color: 0xcc2222, speed: 4, life: 0.6 });
-    if (kind === 'enemy') {
-      world.cash += 25;
-      world.mission.kills += 1;
+    if (car.driver) continue;
+    const d = dist(world.player.x, world.player.z, car.x, car.z);
+    if (d < bestD) {
+      best = car;
+      bestD = d;
     }
+  }
+  if (best) {
+    best.driver = 'player';
+    world.playerCar = best;
+    world.inCar = true;
+    world.sound('door');
   }
 }
 
-function playerMelee(world) {
-  const p = world.player;
-  if (world.time - (p.lastMelee ?? -9) < 0.5) return;
-  p.lastMelee = world.time;
-  const victims = [...world.enemies, ...world.cops, ...world.peds];
-  for (const v of victims) {
-    if (v.dead) continue;
-    const d = Math.hypot(v.x - p.x, v.z - p.z);
-    if (d < 2.2) {
-      v.hp -= 20;
-      if (v.kind === 'ped') addCrime(world.wanted, 1);
-      if (v.hp <= 0) {
-        v.dead = true;
-        v.deadAt = world.time;
-        if (v.kind === 'enemy') world.mission.kills += 1;
-      }
-      return;
-    }
+function stepPlayer(world, input, dt) {
+  const mv = input.move();
+  if (world.playerCar) {
+    updatePlayerCar(world.playerCar, input, dt);
+    world.player.x = world.playerCar.x;
+    world.player.z = world.playerCar.z;
+    world.player.heading = world.playerCar.heading;
+    return;
   }
+  const speed = input.sprint() ? PLAYER.sprintSpeed : PLAYER.walkSpeed;
+  const fx = dirX(world.camYaw);
+  const fz = dirZ(world.camYaw);
+  const rx = Math.sin(world.camYaw);
+  const rz = Math.cos(world.camYaw);
+  world.player.x += (fx * mv.y + rx * mv.x) * speed * dt;
+  world.player.z += (fz * mv.y + rz * mv.x) * speed * dt;
+  world.player.x = clamp(world.player.x, GRID.min, GRID.max);
+  world.player.z = clamp(world.player.z, GRID.min, GRID.max);
+  world.player.heading = world.camYaw;
 }
 
-function stepPlayerOnFoot(world, input, dt) {
-  const p = world.player;
-  const look = input.takeLook();
-  if (look.x || look.y) {
-    world.camYaw -= look.x * 0.004;
-    world.camPitch = Math.max(0.05, Math.min(1.1, world.camPitch + look.y * 0.003));
-    world.camIdle = 0;
-  }
-  const move = input.move();
-  const f = { x: Math.cos(world.camYaw), z: Math.sin(world.camYaw) };
-  const r = { x: -Math.sin(world.camYaw), z: Math.cos(world.camYaw) };
-  let mx = f.x * move.y + r.x * move.x;
-  let mz = f.z * move.y + r.z * move.x;
-  const len = Math.hypot(mx, mz);
-  if (len > 0.01) {
-    mx /= len;
-    mz /= len;
-    const speed = input.sprint() ? PLAYER.sprint : PLAYER.walk;
-    const nx = p.x + mx * speed * dt;
-    const nz = p.z + mz * speed * dt;
-    const fixed = collideCircle(nx, nz, PLAYER.radius, world.city.colliders);
-    p.x = fixed.x;
-    p.z = fixed.z;
-    p.heading = Math.atan2(mz, mx);
-    p.speed = speed;
-    p.phase += speed * dt * 2.2;
-  } else {
-    p.speed = 0;
-  }
-  // Keep the player inside the island.
-  p.x = Math.max(-310, Math.min(310, p.x));
-  p.z = Math.max(-310, Math.min(310, p.z));
-}
-
-function stepPlayerDriving(world, input, dt) {
-  const car = world.playerCar;
-  const move = input.move();
-  const look = input.takeLook();
-  if (look.x || look.y) {
-    world.camYaw -= look.x * 0.004;
-    world.camPitch = Math.max(0.05, Math.min(1.1, world.camPitch + look.y * 0.003));
-    world.camIdle = 0;
-  } else {
-    // Ease the chase camera behind the car when the mouse is still.
-    world.camIdle += dt;
-    if (world.camIdle > 1.2 && Math.abs(car.speed) > 4) {
-      world.camYaw = angleLerp(world.camYaw, car.heading, dt * 1.5);
-    }
-  }
-  const zoom = input.takeZoom();
-  if (zoom) world.camDist = Math.max(6, Math.min(16, world.camDist + zoom));
-  const throttle = move.y;
-  const steer = -move.x;
-  const handbrake = input.sprint();
-  stepCarPhysics(car, throttle, steer, dt, world.city.colliders, { handbrake });
-  // Hard hits damage the car; a wrecked car smokes and crawls.
-  const impact = car.lastImpact ?? 0;
-  if (impact > 8) {
-    car.hp = Math.max(0, (car.hp ?? 100) - (impact - 8) * CAR.damagePerImpact);
-    spawnBurst(world.particles, world.random, car.x, 1.2, car.z, { count: 10, color: 0xffe9a0, speed: 8, life: 0.5 });
-    world.pendingSound = 'crash';
-  }
-  if ((car.hp ?? 100) <= 0) car.speed *= 0.6;
-  // Rosa's garage patches the car up for free when you park close.
-  const garageD = Math.hypot(car.x - LANDMARKS.garage.x, car.z - LANDMARKS.garage.z);
-  if (garageD < 16 && (car.hp ?? 100) < 100) {
-    car.hp = Math.min(100, car.hp + CAR.repairRate * dt);
-    if (car.hp >= 100 && !car.repairedMsg) {
-      car.repairedMsg = true;
-      addMessage(world, "Rosa's Garage — ride fully repaired.");
-    }
-  } else if ((car.hp ?? 100) < 100) {
-    car.repairedMsg = false;
-  }
-  // Handbrake drift kicks up dust at the rear wheels.
-  if (handbrake && Math.abs(car.speed) > 10) {
-    spawnBurst(world.particles, world.random, car.x - Math.cos(car.heading) * 2, 0.4, car.z - Math.sin(car.heading) * 2, { count: 2, color: 0x8a7a66, speed: 2, up: 1, life: 0.7, gravity: 2 });
-  }
-  // A smoking wreck leaves a trail.
-  if ((car.hp ?? 100) < 40 && world.random() < 0.3) {
-    spawnBurst(world.particles, world.random, car.x, 1.6, car.z, { count: 1, color: 0x555555, speed: 1, up: 3, life: 1.2, gravity: -1 });
-  }
-  // The camera, HUD and save all read the player: while driving, the player IS the car.
-  const p = world.player;
-  p.x = car.x;
-  p.z = car.z;
-  p.heading = car.heading;
-  p.speed = car.speed;
-  // Running a pedestrian over is a crime; a hard hit can kill them.
-  for (const ped of world.peds) {
-    if (ped.dead) continue;
-    const d = Math.hypot(ped.x - car.x, ped.z - car.z);
-    if (d < 2.6 && Math.abs(car.speed) > 3) {
-      ped.hp = 0;
-      ped.dead = true;
-      ped.deadAt = world.time;
-      addCrime(world.wanted, 1);
-      addMessage(world, 'You ran someone over!');
-      world.pendingSound = 'crash';
-      car.speed *= 0.6;
-    }
-  }
-}
-
-function stepTaxi(world, dt) {
-  const taxi = world.taxi;
-  taxi.cooldown -= dt;
-  if (taxi.state === 'idle' && taxi.cooldown <= 0 && world.playerCar) {
-    const spot = randomSidewalkPoint(world.random);
-    const passenger = createPedState(world.city, world.random);
-    passenger.x = spot.x;
-    passenger.z = spot.z;
-    passenger.state = 'wait';
-    world.peds.push(passenger);
-    taxi.passenger = passenger;
-    taxi.state = 'waiting';
-    addMessage(world, 'A fare is waving you down — pull up close.');
-  }
-  if (taxi.state === 'waiting' && taxi.passenger) {
-    taxi.passenger.wait = 5; // the fare waits where they stand
-    const d = Math.hypot(taxi.passenger.x - world.player.x, taxi.passenger.z - world.player.z);
-    if (world.playerCar && d < 7) {
-      taxi.dest = randomIntersection(world.random);
-      taxi.fare = 25 + Math.floor(world.random() * 40);
-      taxi.timer = 90;
-      taxi.state = 'riding';
-      const i = world.peds.indexOf(taxi.passenger);
-      if (i >= 0) world.peds.splice(i, 1);
-      addMessage(world, `Fare aboard — take them to the marker ($${taxi.fare}).`);
-    }
-  }
-  if (taxi.state === 'riding') {
-    taxi.timer -= dt;
-    const d = Math.hypot(taxi.dest.x - world.player.x, taxi.dest.z - world.player.z);
-    if (d < 8) {
-      world.cash += taxi.fare;
-      world.rep += 1;
-      addMessage(world, `Fare paid: $${taxi.fare}.`);
-      world.pendingSound = 'pickup';
-      taxi.state = 'idle';
-      taxi.cooldown = 25;
-      taxi.passenger = null;
-    } else if (taxi.timer <= 0) {
-      addMessage(world, 'The fare got out — too slow.');
-      taxi.state = 'idle';
-      taxi.cooldown = 25;
-      taxi.passenger = null;
-    }
-  }
-}
-
-/** One fixed simulation step. Returns 'busted' | 'wasted' when the run ends, else null. */
-export function stepWorld(world, input, dt, audio) {
+export function stepWorld(world, input, dt, renderer) {
+  world.dt = dt;
   world.time += dt;
-  const p = world.player;
+  // The day cycles with play time — except in shot mode, where the staged
+  // time of day must survive the fixed staging steps.
+  if (!world.shot) world.dayTime = (8 + world.time / 20) % 24;
+  if (world.combatCooldown > 0) world.combatCooldown -= dt;
 
-  if (world.endState) return world.endState;
+  // Camera look and zoom from the input.
+  const look = input.takeLook();
+  world.camYaw -= look.x * 0.005;
+  world.camPitch = clamp(world.camPitch + look.y * 0.003, -0.6, 0.5);
+  world.zoom = clamp(world.zoom + input.takeZoom() * 0.1, 0, 1);
 
-  // Per-frame derived state the HUD and the renderer read.
-  world.__objective = objectiveOf(world);
-  world.nearCar = world.playerCar ? null : nearestCar(world, p.x, p.z, 4.5);
-  // Side-activity markers: F near the stadium starts a street race, F near the market
-  // starts a courier gig — only while no story mission is running.
-  world.nearActivity = null;
-  if (!world.mission.active) {
-    const raceStart = raceStartPoint();
-    const courierStart = courierStartPoint();
-    if (world.activities.race.state === 'idle'
-      && Math.hypot(p.x - raceStart.x, p.z - raceStart.z) < 8) {
-      world.nearActivity = 'race';
-    } else if (world.activities.courier.state === 'idle'
-      && Math.hypot(p.x - courierStart.x, p.z - courierStart.z) < 8) {
-      world.nearActivity = 'courier';
-    }
-  }
-
-  // Mission delay after a completion: the next one starts on its own.
-  if (world.missionDelay > 0) {
-    world.missionDelay -= dt;
-    if (world.missionDelay <= 0 && world.missionIndex < MISSION_COUNT) {
-      startMission(world.mission, world.missionIndex, missionFacade(world));
-    }
-  }
-
-  const actions = input.takeActions();
-  if (actions & ACTION_ENTER) {
-    if (world.playerCar) exitCar(world);
-    else enterCar(world);
-  }
-  if (actions & ACTION_INTERACT) {
-    if (world.nearActivity === 'race' && world.playerCar) {
-      startStreetRace(world);
-    } else if (world.nearActivity === 'race') {
-      addMessage(world, 'You need a car for the street race.');
-    } else if (world.nearActivity === 'courier') {
-      startCourier(world);
-    } else if (!world.playerCar) {
-      playerMelee(world);
-    }
-  }
-  if (actions & ACTION_RELOAD && !world.playerCar) {
-    const weapon = WEAPONS[p.weapon];
-    if (p.ammo < weapon.mag) p.reloading = weapon.reload;
-  }
-  if (actions & ACTION_WEAPON && world.hasSmg) {
-    p.weapon = p.weapon === 'pistol' ? 'smg' : 'pistol';
-    p.ammo = WEAPONS[p.weapon].mag;
-    p.reloading = 0;
-    addMessage(world, `Weapon: ${WEAPONS[p.weapon].name}`);
-  }
-
-  if (world.playerCar) stepPlayerDriving(world, input, dt);
-  else stepPlayerOnFoot(world, input, dt);
-
-  if (p.reloading > 0) {
-    p.reloading -= dt;
-    if (p.reloading <= 0) p.ammo = WEAPONS[p.weapon].mag;
-  }
-  if (!world.playerCar && input.attackHeld()) playerShoot(world);
-
-  // Health regen after a quiet spell.
-  if (world.time - p.lastDamage > PLAYER.regenDelay && p.hp > 0 && p.hp < PLAYER.health) {
-    p.hp = Math.min(PLAYER.health, p.hp + PLAYER.regenRate * dt);
-  }
-
-  // Traffic and pedestrians.
-  const allCars = [...world.cars, ...world.policeCars];
-  for (const car of world.cars) {
-    if (car.driver === 'npc' || car.driver === 'taxi') stepTraffic(car, dt, world.city, world.random, allCars);
-    else if (car.driver === null && car !== world.playerCar) {
-      // Parked: nothing to do.
-    }
-  }
-  for (let i = 0; i < world.cars.length; i += 1) {
-    for (let j = i + 1; j < world.cars.length; j += 1) separateCars(world.cars[i], world.cars[j]);
-  }
-  for (const ped of world.peds) {
-    if (ped.dead) continue;
-    const fleeing = world.time < ped.fleeUntil;
-    const threat = (world.playerCar && Math.abs(world.playerCar.speed) > 6)
-      ? world.playerCar : (fleeing || world.time - p.lastShot < 0.5 ? p : null);
-    stepPed(ped, dt, world.city, threat, world.time, world.random);
-    if (threat && Math.hypot(ped.x - threat.x, ped.z - threat.z) < 12) ped.fleeUntil = world.time + 3;
-  }
-  world.peds = world.peds.filter((ped) => !ped.dead || world.time - (ped.deadAt ?? 0) < 8);
-  if (world.peds.length < 20) world.peds.push(createPedState(world.city, world.random));
-
-  // Wanted: police cars and foot cops.
-  const nearestCop = world.policeCars.length
-    ? Math.min(...world.policeCars.map((c) => Math.hypot(c.x - p.x, c.z - p.z)))
-    : Infinity;
-  stepWanted(world.wanted, dt, nearestCop);
-  // Roadblocks at three stars and up: two units park across the road ahead.
-  const rb = world.roadblock;
-  rb.cooldown -= dt;
-  if (world.wanted.level >= WANTED.roadblockAt && !rb.active && rb.cooldown <= 0) {
-    spawnRoadblock(world);
-  }
-  if (rb.active) {
-    rb.timer -= dt;
-    if (world.wanted.level < WANTED.roadblockAt || rb.timer <= 0) {
-      for (const car of rb.cars) {
-        const i = world.cars.indexOf(car);
-        if (i >= 0) world.cars.splice(i, 1);
-        const j = world.policeCars.indexOf(car);
-        if (j >= 0) world.policeCars.splice(j, 1);
-      }
-      rb.cars = [];
-      rb.active = false;
-      rb.cooldown = WANTED.roadblockCooldown;
-    }
-  }
-  // Patrol cars only (roadblock units hold their ground and are not counted here).
-  const wantCars = wantedCarCount(world.wanted.level);
-  const patrol = () => world.policeCars.filter((c) => !c.block);
-  while (patrol().length < wantCars) {
-    const car = spawnPoliceCar(world.city, world.random, p);
-    world.policeCars.push(car);
-    world.cars.push(car);
-  }
-  while (patrol().length > wantCars) {
-    const cars = patrol();
-    const car = cars[cars.length - 1];
-    const i = world.cars.indexOf(car);
-    if (i >= 0) world.cars.splice(i, 1);
-    const j = world.policeCars.indexOf(car);
-    if (j >= 0) world.policeCars.splice(j, 1);
-  }
-  for (const car of world.policeCars) {
-    car.topSpeed = CAR.policeSpeed + (world.wanted.level - 1) * WANTED.policeSpeedPerStar;
-    stepPoliceCar(car, dt, world.city, p, world.playerCar);
-  }
-  if (world.wanted.level >= 2 && world.cops.length < world.wanted.level) {
-    world.cops.push(spawnFootCop(world.city, world.random, p));
-  }
-  for (const cop of world.cops) {
-    const result = stepFootCop(cop, dt, p, world.playerCar !== null, world.time, world.random, world.wanted.level);
-    if (result === 'bust') {
-      world.endState = 'busted';
-      return 'busted';
-    }
-    if (result === 'shoot') {
-      world.tracers.push({
-        from: { x: cop.x, y: 1.4, z: cop.z },
-        to: { x: p.x, y: 1.4, z: p.z },
-        ttl: 0.09,
-        color: 0xff5544,
-      });
-      if (world.random() < 0.4) damagePlayer(world, 8);
-      world.pendingSound = 'enemyShot';
-    }
-  }
-  world.cops = world.cops.filter((c) => Math.hypot(c.x - p.x, c.z - p.z) < 120);
-
-  // Enemies: guard, chase, shoot.
-  for (const e of world.enemies) {
-    if (e.dead) continue;
-    const d = Math.hypot(e.x - p.x, e.z - p.z);
-    if (d < 35) {
-      e.state = 'chase';
-      const want = Math.atan2(p.z - e.z, p.x - e.x);
-      let diff = want - e.heading;
-      while (diff > Math.PI) diff -= TAU;
-      while (diff < -Math.PI) diff += TAU;
-      e.heading += Math.max(-3 * dt, Math.min(3 * dt, diff));
-      if (d > 14) {
-        e.x += Math.cos(e.heading) * 4.5 * dt;
-        e.z += Math.sin(e.heading) * 4.5 * dt;
-        e.phase += 4.5 * dt * 2.4;
-      }
-      e.lastShot += dt;
-      if (d < 30 && e.lastShot > 1.3) {
-        e.lastShot = 0;
-        world.tracers.push({
-          from: { x: e.x, y: 1.4, z: e.z },
-          to: { x: p.x + (world.random() - 0.5) * 3, y: 1.4, z: p.z + (world.random() - 0.5) * 3 },
-          ttl: 0.09,
-          color: 0xff5544,
-        });
-        if (world.random() < 0.45) damagePlayer(world, 10);
-        world.pendingSound = 'enemyShot';
-      }
+  // Missions: start the next one, or advance / finish / fail the active one.
+  if (world.missionIndex < MISSIONS.length) {
+    if (!world.mission.active) {
+      startMission(world.mission, world.missionIndex, world);
     } else {
-      e.state = 'guard';
-    }
-  }
-  world.enemies = world.enemies.filter((e) => !e.dead || world.time - (e.deadAt ?? 0) < 10);
-
-  // Collectibles.
-  for (const c of world.collectibles) {
-    if (c.taken) continue;
-    c.angle += dt * 2;
-    if (!world.playerCar && Math.hypot(c.x - p.x, c.z - p.z) < 2.2) {
-      c.taken = true;
-      world.cash += 100;
-      spawnBurst(world.particles, world.random, c.x, 1.4, c.z, { count: 8, color: 0xf2c230, speed: 3, up: 5, life: 0.8 });
-      addMessage(world, 'Hidden package found: +$100.');
-      world.pendingSound = 'pickup';
-    }
-  }
-
-  stepTaxi(world, dt);
-  stepActivities(world, dt);
-  stepParticles(world.particles, dt);
-
-  // Missions.
-  if (world.mission.active) {
-    const step = world.mission.step;
-    const mission = world.mission.index;
-    if (mission === 1 && step <= 1) ensureTargetCar(world);
-    const result = updateMission(world.mission, missionFacade(world));
-    if (result === 'done') {
-      const done = world.mission.index;
-      world.completed.push(done);
-      world.missionIndex = done + 1;
-      const reward = MISSIONS[done].reward;
-      world.cash += reward.cash;
-      world.rep += reward.rep;
-      world.lastReward = reward.cash;
-      if (reward.unlockSmg) {
-        world.hasSmg = true;
-        world.player.weapon = 'smg';
-        world.player.ammo = WEAPONS.smg.mag;
-      }
-      cleanupMissionCars(world);
-      saveGame(world);
-      if (world.missionIndex < MISSION_COUNT) world.missionDelay = 3;
-      else addMessage(world, 'Story complete — Solmar Bay is yours.');
-    } else if (result === 'fail') {
-      // A failed escape restarts the same mission.
-      cleanupMissionCars(world);
-      startMission(world.mission, world.mission.index, missionFacade(world));
-    }
-  }
-
-  // Tracers fade.
-  for (const t of world.tracers) t.ttl -= dt;
-  world.tracers = world.tracers.filter((t) => t.ttl > 0);
-  world.messages = world.messages.filter((m) => m.until > world.time);
-
-  // Audio: engine hum and siren.
-  if (audio) {
-    const speed01 = world.playerCar ? Math.abs(world.playerCar.speed) / CAR.maxSpeed : 0;
-    audio.engine(speed01);
-    audio.siren(world.wanted.level > 0 && world.policeCars.length > 0);
-    if (world.pendingSound) {
-      audio[world.pendingSound]?.();
-      world.pendingSound = null;
-    }
-  }
-
-  if (world.endState) return world.endState;
-  return null;
-}
-
-/** After a busted/wasted screen, put the player back on their feet. */
-export function afterDeath(world) {
-  respawn(world, world.endState);
-}
-
-/** The current objective for the HUD and the minimap, or null. */
-export function objectiveOf(world) {
-  if (world.mission.active) {
-    const step = MISSIONS[world.mission.index]?.steps[world.mission.step];
-    if (step) {
-      if (step.type === 'tail' && world.markCar) {
-        return { text: step.text, at: { x: world.markCar.x, z: world.markCar.z }, mission: MISSIONS[world.mission.index].title };
-      }
-      if (step.type === 'escort' && world.escortCar) {
-        return { text: step.text, at: { x: world.escortCar.x, z: world.escortCar.z }, mission: MISSIONS[world.mission.index].title };
+      const result = updateMission(world.mission, world);
+      if (result === 'done') {
+        const done = MISSIONS[world.missionIndex];
+        world.cash += done.reward.cash;
+        world.rep += done.reward.rep;
+        if (world.missionIndex === 4) {
+          world.hasSmg = true;
+          world.message('SMG unlocked!');
+        }
+        world.message(`Mission complete: ${done.title} +$${done.reward.cash}`);
+        world.sound('win');
+        world.missionIndex += 1;
+        resetMissionState(world.mission);
+        if (!world.shot) {
+          try {
+            saveGame(world);
+          } catch {
+            // Saving is best-effort; the game goes on without it.
+          }
+        }
+      } else if (result === 'fail') {
+        resetMissionState(world.mission);
       }
     }
-    return currentObjective(world.mission);
   }
-  if (world.activities.race.state === 'running') {
-    const race = world.activities.race;
-    const point = race.points[race.idx];
-    return { text: `Street race — checkpoint ${race.idx + 1}/${race.points.length}`, at: point, mission: 'Street race' };
+
+  // The target car for a steal / deliver step: a parked sedan, picked once.
+  const step = world.mission.active ? MISSIONS[world.mission.index].steps[world.mission.step] : null;
+  if (step && (step.type === 'stealCar' || step.type === 'deliverCar')) {
+    if (!world.targetCar) {
+      world.targetCar = world.cars.find((c) => c.kind === 'sedan' && c.driver === null) || world.cars[0];
+    }
+  } else if (world.targetCar && world.missionIndex < MISSIONS.length) {
+    world.targetCar = null;
   }
-  if (world.activities.courier.state === 'running') {
-    const courier = world.activities.courier;
-    const drop = courier.drops[courier.idx];
-    return { text: `Courier — drop ${courier.idx + 1}/${courier.drops.length}`, at: drop, mission: 'Courier gig' };
+
+  // Actions (E): enter/exit a car, start an activity, repair at the garage.
+  const actions = input.takeActions();
+  for (let i = 0; i < actions; i += 1) {
+    if (world.playerCar) {
+      const g = PLACES.garage;
+      if (dist(world.playerCar.x, world.playerCar.z, g.x, g.z) < 12 && world.playerCar.damage > 0 && world.cash >= 50) {
+        world.playerCar.damage = 0;
+        world.cash -= 50;
+        world.message('Car repaired -$50');
+        continue;
+      }
+    }
+    if (!world.playerCar) {
+      if (dist(world.player.x, world.player.z, PLACES.stadium.x, PLACES.stadium.z) < 20) {
+        startStreetRace(world);
+        continue;
+      }
+      if (dist(world.player.x, world.player.z, PLACES.market.x, PLACES.market.z) < 20) {
+        startCourier(world);
+        continue;
+      }
+    }
+    enterOrExitCar(world);
   }
-  if (world.taxi.state === 'riding') return { text: `Take the fare to the marker ($${world.taxi.fare})`, at: world.taxi.dest, mission: 'Taxi fare' };
-  if (world.taxi.state === 'waiting') return { text: 'A fare is waiting for a ride', at: { x: world.taxi.passenger.x, z: world.taxi.passenger.z }, mission: 'Taxi fare' };
-  return null;
+
+  stepPlayer(world, input, dt);
+
+  // Traffic, the mark and the escort truck.
+  for (const car of world.cars) {
+    if (car.driver === 'npc') updateNpcCar(car, dt, world.rng);
+    else if (car.driver === 'mark') {
+      if (!car.route) {
+        const tail = step && step.type === 'tail' ? step : null;
+        if (tail) car.route = gridPath({ x: car.x, z: car.z }, tail.dest);
+      }
+      if (car.route) followRoute(car, dt);
+    } else if (car.driver === 'escort') {
+      followRoute(car, dt);
+    }
+  }
+
+  if (input.attackHeld()) fireWeapon(world, input);
+
+  updatePeds(world, dt);
+  updatePolice(world, dt);
+  updateEnemies(world, dt);
+  updateParticles(world, dt);
+  updateActivities(world, dt);
+
+  // Hidden packages: walk over one to collect it.
+  for (const pack of world.collectibles) {
+    if (!pack.taken && dist(world.player.x, world.player.z, pack.x, pack.z) < INTERACT.pickup) {
+      pack.taken = true;
+      world.packagesCollected += 1;
+      world.cash += REWARDS.package;
+      world.message(`Hidden package ${world.packagesCollected}/20 +$${REWARDS.package}`);
+      world.sound('pickup');
+    }
+  }
+
+  // Wanted cools off after 30 quiet seconds.
+  if (world.wanted.level > 0 && world.time - world.wanted.since > 30) {
+    world.wanted.level -= 1;
+    world.wanted.since = world.time;
+  }
+
+  // Car damage smoke.
+  if (world.playerCar && world.playerCar.damage > 50 && world.rng.chance(dt * 8)) {
+    spawnSmoke(world, world.playerCar.x, 1.5, world.playerCar.z);
+  }
+
+  if (world.player.hp <= 0 && !world.endState) world.endState = 'wasted';
 }

@@ -1,140 +1,131 @@
-// The HUD: a thin DOM layer over the world state. It only writes text when a value
-// actually changed, so it stays cheap at 60 fps. All ids live in index.html.
+// Solmar Bay — the HUD: cash, objective, speed, wanted stars, clock,
+// mission progress, package count, activity timers, messages, and the
+// minimap. Plain DOM + a 2D canvas, updated once per frame from the world.
+// Element ids must match game/index.html.
+import { GRID, ROADS } from './config.js';
 import { MISSIONS } from './missions.js';
-import { DAY_LENGTH, STEP, WANTED, WEAPONS } from './config.js';
 
-function $(id) {
-  return document.getElementById(id);
+function fmtClock(dayTime) {
+  const h = Math.floor(dayTime) % 24;
+  const m = Math.floor((dayTime - h) * 60);
+  return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`;
 }
 
-export function createHud() {
-  const els = {
-    cash: $('cash'),
-    rep: $('rep'),
-    hpFill: $('hp-fill'),
-    stars: $('stars'),
-    objective: $('objective'),
-    objectiveDist: $('objective-dist'),
-    speed: $('speed'),
-    weapon: $('weapon'),
-    message: $('message'),
-    crosshair: $('crosshair'),
-    hint: $('hint'),
-    screenTitle: $('screen-title'),
-    screenSub: $('screen-sub'),
-    missionBanner: $('mission-banner'),
-    missionBannerTitle: $('mission-banner-title'),
-    missionBannerText: $('mission-banner-text'),
-    clock: $('clock'),
-    packages: $('packages'),
-  };
-  const last = {};
-  let messageTimer = 0;
-  let bannerTimer = 0;
-
-  function setText(el, key, value) {
-    if (last[key] !== value) {
-      last[key] = value;
-      if (el) el.textContent = value;
+function drawMinimap(world) {
+  const canvas = document.getElementById('minimap');
+  if (!canvas) return;
+  const ctx = canvas.getContext('2d');
+  if (!ctx) return;
+  const S = canvas.width;
+  const toMap = (v) => ((v - GRID.min) / (GRID.max - GRID.min)) * S;
+  ctx.clearRect(0, 0, S, S);
+  ctx.fillStyle = '#0e1a24';
+  ctx.fillRect(0, 0, S, S);
+  // Roads.
+  ctx.strokeStyle = '#3a4a58';
+  ctx.lineWidth = 2;
+  for (const r of ROADS) {
+    ctx.beginPath();
+    ctx.moveTo(toMap(r), 0);
+    ctx.lineTo(toMap(r), S);
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.moveTo(0, toMap(r));
+    ctx.lineTo(S, toMap(r));
+    ctx.stroke();
+  }
+  // Remaining packages.
+  ctx.fillStyle = '#ffd34d';
+  for (const pack of world.collectibles) {
+    if (pack.taken) continue;
+    ctx.fillRect(toMap(pack.x) - 1, toMap(pack.z) - 1, 2, 2);
+  }
+  // Mission target: a gold star on the current step's destination.
+  if (world.mission.active && world.mission.index >= 0) {
+    const mission = MISSIONS[world.mission.index];
+    const step = mission && mission.steps[world.mission.step];
+    const target = step && (step.at || step.dest || (step.points && step.points[world.mission.checkpoint]));
+    if (target) {
+      ctx.fillStyle = '#ffd34d';
+      const tx = toMap(target.x);
+      const tz = toMap(target.z);
+      ctx.beginPath();
+      ctx.arc(tx, tz, 4, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = '#0e1a24';
+      ctx.font = 'bold 7px system-ui, sans-serif';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText('★', tx, tz + 0.5);
     }
   }
+  // Race checkpoints / courier drops while an activity runs.
+  ctx.fillStyle = '#37d67a';
+  if (world.activities.race.state === 'running') {
+    for (const p of world.activities.race.points) {
+      ctx.beginPath();
+      ctx.arc(toMap(p.x), toMap(p.z), 3, 0, Math.PI * 2);
+      ctx.fill();
+    }
+  }
+  ctx.fillStyle = '#ff9f2e';
+  if (world.activities.courier.state === 'running') {
+    for (const p of world.activities.courier.drops) {
+      ctx.fillRect(toMap(p.x) - 2, toMap(p.z) - 2, 4, 4);
+    }
+  }
+  // Police.
+  ctx.fillStyle = '#4d8dff';
+  for (const car of world.policeCars) {
+    ctx.beginPath();
+    ctx.arc(toMap(car.x), toMap(car.z), 2.5, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  for (const cop of world.cops) {
+    ctx.fillRect(toMap(cop.x) - 1.5, toMap(cop.z) - 1.5, 3, 3);
+  }
+  // The player, as a triangle pointing along the heading.
+  const px = toMap(world.player.x);
+  const pz = toMap(world.player.z);
+  const a = world.player.heading;
+  ctx.fillStyle = '#ffffff';
+  ctx.beginPath();
+  ctx.moveTo(px + Math.cos(a) * 5, pz - Math.sin(a) * 5);
+  ctx.lineTo(px + Math.cos(a + 2.6) * 4, pz - Math.sin(a + 2.6) * 4);
+  ctx.lineTo(px + Math.cos(a - 2.6) * 4, pz - Math.sin(a - 2.6) * 4);
+  ctx.closePath();
+  ctx.fill();
+}
 
-  return {
-    /** One message line that fades after a few seconds. */
-    message(text, seconds = 4) {
-      setText(els.message, 'message', text);
-      messageTimer = seconds;
-    },
-    /** A big mission banner (mission started / completed). */
-    banner(title, text, seconds = 5) {
-      if (els.missionBanner) {
-        els.missionBannerTitle.textContent = title;
-        els.missionBannerText.textContent = text;
-        els.missionBanner.classList.add('show');
-      }
-      bannerTimer = seconds;
-    },
-    /** Paint the HUD from the world, once per frame. */
-    update(world, screen, dt) {
-      if (messageTimer > 0) {
-        messageTimer -= dt;
-        if (messageTimer <= 0 && els.message) els.message.textContent = '';
-      }
-      if (bannerTimer > 0) {
-        bannerTimer -= dt;
-        if (bannerTimer <= 0 && els.missionBanner) els.missionBanner.classList.remove('show');
-      }
-      const inGame = screen === 'play';
-      setText(els.cash, 'cash', `$${Math.floor(world.cash).toLocaleString('en-US')}`);
-      setText(els.rep, 'rep', `REP ${world.rep}`);
-      if (els.packages) {
-        const found = world.collectibles.filter((c) => c.taken).length;
-        setText(els.packages, 'packages', `PKG ${found}/${world.collectibles.length}`);
-      }
-      if (els.hpFill) els.hpFill.style.width = `${Math.max(0, world.player.hp)}%`;
-      const wanted = '★'.repeat(world.wanted.level) + '☆'.repeat(WANTED.max - world.wanted.level);
-      setText(els.stars, 'stars', wanted);
-      if (els.stars) els.stars.classList.toggle('hot', world.wanted.level >= 3);
-      const objective = world.__objective;
-      if (objective && objective.at) {
-        const d = Math.hypot(objective.at.x - world.player.x, objective.at.z - world.player.z);
-        setText(els.objective, 'objective', objective.text);
-        setText(els.objectiveDist, 'objective-dist', `${Math.round(d)}m`);
-      } else {
-        const def = world.mission && world.mission.active ? MISSIONS[world.mission.index] : null;
-        setText(els.objective, 'objective', def ? def.title : 'Free roam');
-        setText(els.objectiveDist, 'objective-dist', '');
-      }
-      const speed = world.playerCar
-        ? Math.round(Math.abs(world.playerCar.speed) * 3.6)
-        : Math.round(world.player.speed * 3.6);
-      setText(els.speed, 'speed', `${speed} km/h`);
-      const weapon = WEAPONS[world.player.weapon] || WEAPONS.pistol;
-      const ammo = world.playerCar ? '—' : `${world.player.ammo} / ${weapon.mag}`;
-      setText(els.weapon, 'weapon', `${weapon.name} ${ammo}`);
-      if (els.crosshair) {
-        els.crosshair.style.display = inGame && !world.playerCar ? 'block' : 'none';
-      }
-      if (els.hint) {
-        let hint = '';
-        if (inGame && world.nearCar) hint = 'E — enter car';
-        else if (inGame && world.playerCar) hint = 'E — exit car · Shift — handbrake';
-        if (inGame && world.nearActivity === 'race') hint = 'F — start street race';
-        else if (inGame && world.nearActivity === 'courier') hint = 'F — start courier gig';
-        setText(els.hint, 'hint', hint);
-      }
-      if (els.clock) {
-        const hours = (8 + (world.time / DAY_LENGTH) * 24) % 24;
-        const hh = Math.floor(hours);
-        const mm = Math.floor((hours - hh) * 60);
-        setText(els.clock, 'clock', `${String(hh).padStart(2, '0')}:${String(mm).padStart(2, '0')}`);
-      }
-      if (els.screenTitle) {
-        const [title, sub] = screen === 'over'
-          ? (world.endState === 'busted' ? ['BUSTED', 'The Solmar Bay PD caught you.'] : ['WASTED', 'The streets of Solmar Bay claimed you.'])
-          : ['', ''];
-        setText(els.screenTitle, 'screen-title', title);
-        setText(els.screenSub, 'screen-sub', sub);
-      }
-      // Step indicator under the objective: mission step + progress, race/courier clocks.
-      const stepEl = $('mission-step');
-      if (stepEl) {
-        let line = '';
-        if (world.mission && world.mission.active) {
-          const def = MISSIONS[world.mission.index];
-          const step = def ? def.steps[world.mission.step] : null;
-          const timed = step && ['escape', 'timed', 'race'].includes(step.type) && world.mission.timer > 0;
-          const timer = timed ? ` · ${Math.ceil(world.mission.timer)}s` : '';
-          line = step && step.text ? `▸ ${step.text} — ${world.mission.index + 1}/${MISSIONS.length}${timer}` : '';
-        } else if (world.activities.race.state === 'running') {
-          const race = world.activities.race;
-          line = `Race checkpoint ${race.idx + 1}/${race.points.length} · ${Math.ceil(race.timer)}s`;
-        } else if (world.activities.courier.state === 'running') {
-          const courier = world.activities.courier;
-          line = `Courier drop ${courier.idx + 1}/${courier.drops.length} · ${Math.ceil(courier.timer)}s`;
-        }
-        setText(stepEl, 'mission-step', line);
-      }
-    },
+export function updateHud(world) {
+  const set = (id, text) => {
+    const el = document.getElementById(id);
+    if (el) el.textContent = text;
   };
+  set('cash', `$${Math.round(world.cash)}`);
+  set('objective', world.objective());
+  const speed = world.playerCar ? Math.abs(world.playerCar.speed) * 3.6 : 0;
+  set('speed', `${Math.round(speed)} km/h`);
+  set('wanted', '★'.repeat(world.wanted.level) + '☆'.repeat(5 - world.wanted.level));
+  set('clock', fmtClock(world.dayTime));
+  set('mission-progress', `${world.missionIndex}/12`);
+  set('pkg', `PKG ${world.packagesCollected}/20`);
+  const race = world.activities.race;
+  set(
+    'race-timer',
+    race.state === 'running'
+      ? `Race ${Math.max(0, 120 - race.t).toFixed(0)}s ${race.idx}/${race.points.length}`
+      : race.best != null
+        ? `Race best ${race.best.toFixed(1)}s`
+        : '',
+  );
+  const courier = world.activities.courier;
+  set('courier-timer', courier.state === 'running' ? `Courier ${courier.idx}/${courier.drops.length}` : '');
+  const msg = world.lastMessage || '';
+  set('message', msg);
+  const hp = document.getElementById('hp');
+  if (hp) hp.style.width = `${Math.max(0, Math.round(world.player.hp))}%`;
+  const dmg = world.playerCar ? world.playerCar.damage : 0;
+  set('car-damage', world.playerCar ? `Damage ${Math.round(dmg)}%` : '');
+  drawMinimap(world);
 }
