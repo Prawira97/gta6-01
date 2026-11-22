@@ -46,9 +46,10 @@ export function stageShot(name, canvasSize) {
     return { world, screen: 'play' };
   }
   if (shot.kind === 'mission') {
-    // The warehouse shootout: Kai on foot, guards closing in, tracer in the air.
-    world.missionIndex = 5;
-    world.startMission(5);
+    // Kane's Vault, the finale: Kai on foot at the casino, Rico and his guards
+    // closing in, tracer in the air.
+    world.missionIndex = 11;
+    world.startMission(11);
     // Clear the first step (reach the casino) so the kill step spawns its guards.
     world.player.x = LANDMARKS.casino.x;
     world.player.z = LANDMARKS.casino.z;
